@@ -11,3 +11,4 @@ DerivedDataCache/
 *.suo
 *.xcodeproj
 *.xcworkspace
+pie_heartbeat.log
