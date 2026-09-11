@@ -1,0 +1,22 @@
+# Default hyperparameters for the PyBullet SafeNav3DEnv training pipeline.
+env:
+  size: 10
+  max_hazards: 5
+  curriculum: true
+  force_mag: 12.0
+  goal_threshold: 1.0
+  hazard_threshold: 1.3
+
+shield:
+  safe_dist: 2.2
+
+training:
+  timesteps: 30000
+  algo: PPO
+  policy: MlpPolicy
+  verbose: 1
+  output_plot: saferl_metrics.png
+
+demo:
+  steps: 800
+  fps: 60
