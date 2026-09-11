@@ -94,40 +94,55 @@ Safety interventions ensure the agent avoids hazards but may limit exploration i
 
 ## Phase 2 (2026-09-11): UE viability spike + repo restructure
 
-### Goal A: UE Python-API viability spike -- BLOCKED, checkpoint for you
+### Goal A: UE Python-API viability spike -- executed, result inconclusive, my recommendation is the fallback
 
-The only UE 5.8 install found on this machine lives on an NTFS partition
-(`/dev/nvme0n1p3`) that isn't mounted, and mounting it needs `sudo` with an
-interactive password, which this session can't supply. So the spike is
-**fully scaffolded but not yet executed** -- see
-[`ue_spike/README.md`](ue_spike/README.md) for the complete writeup. In
-short, once you run:
-```bash
-sudo mkdir -p /mnt/bigdata
-sudo mount -t ntfs-3g -o remove_hiberfile,rw,uid=1000,gid=1000 /dev/nvme0n1p3 /mnt/bigdata
-./ue_spike/run_spike.sh
-```
-that script launches `UnrealEditor-Cmd` headless (`-nullrhi -unattended`)
-against a minimal content-only project, runs a 500-step `reset()`/`step()`
-loop against a placeholder actor through UE's in-process Editor Python API
-(chosen over an external-process + Remote Execution setup -- fewer moving
-parts, see the spike README for the reasoning), and writes
-`ue_spike/ue_spike_results.json` with the measured steps/sec.
+The drive holding UE 5.8 (`/dev/nvme0n1p3`, `/mnt/bigdata`) got mounted and
+the spike ran for real. Full writeup with both measurements and the
+reasoning: [`ue_spike/README.md`](ue_spike/README.md). Short version:
 
-**No go/no-go decision has been made** -- there's no real measurement yet
-to base one on. Once you have the steps/sec number:
-- `saferl/configs/default.yaml` trains for `timesteps: 30000` (matching
-  the original script). Divide 30000 by the measured rate to get how long
-  one run would take, and remember PPO in this problem space will likely
-  want well beyond 30k steps once the shield/reward stop being
-  placeholders -- multiply accordingly.
-- If that's too slow to be a practical training loop: fall back to
-  training in the existing fast PyBullet env (dynamics already match the
-  toy env's equations) and use UE only for rendering/demo playback of a
-  trained policy -- update this section with that decision and what it
-  requires once you make the call.
-- This is a decision for you, not something to resolve by proceeding into
-  Phase 3 unilaterally.
+- **Commandlet-mode measurement (real, but not the number that matters):**
+  `./ue_spike/run_spike.sh` ran 500 `reset()`/`step()` calls against a
+  placeholder actor through UE's in-process Editor Python API (chosen
+  over an external-process + Remote Execution setup -- fewer moving parts)
+  headless via `UnrealEditor-Cmd -run=pythonscript -nullrhi -unattended`.
+  Stable across two runs, no crash: **~179,000-181,000 "steps"/sec**. But
+  this is a single Python script executing with no running frame loop at
+  all between calls -- it's the floor cost of a Python-to-C++ property
+  accessor call, not a per-simulated-frame rate. It was never going to be
+  the bottleneck, and isn't informative for training-speed purposes on
+  its own.
+- **Tick-driven measurement (blocked):** tried to get a number bound by a
+  real running engine loop by registering a per-tick callback and driving
+  one step per actual engine tick, launched as a persistent (non-
+  commandlet) process. Tried 4 ways (`UnrealEditor-Cmd`/`UnrealEditor` x
+  with/without `-unattended`); all four self-terminated within 1-2 ticks
+  regardless of the registered callback -- a bare `-nullrhi` editor with
+  no PIE/game session apparently has nothing it considers worth staying
+  alive for. That's a real finding: sustaining a persistent headless
+  training loop needs a running PIE/`-game` session, not just a Python
+  callback -- more infrastructure than this spike's scope.
+- **Arithmetic:** `saferl/configs/default.yaml` trains for
+  `timesteps: 30000`. At the (not representative) 180k/s call-overhead
+  number that's ~0.17s; at a genuine physics-tick rate it could be
+  anywhere from a few seconds to tens of minutes depending on whether
+  headless UE throttles ticks toward real-time (30-120fps) or runs much
+  faster unthrottled with nothing to render -- a spread wide enough that
+  guessing isn't useful, and PPO here will likely want well beyond 30k
+  steps once the shield/reward move past placeholders, widening the gap
+  further.
+- **For comparison, a known quantity:** this session's PyBullet regression
+  check (below) trained the full 30k-timestep run in ~28s at ~1090 fps,
+  headless, no extra infrastructure.
+
+**My recommendation** (yours to accept or override, not decided
+unilaterally): default to the fallback -- train in the existing PyBullet
+env, use UE only for rendering/demo playback of a trained policy. That
+needs no new engineering (`saferl/demo/run_demo.py` already renders via a
+GUI env; swapping renderers later is a smaller lift than making UE the
+live training loop now). If you'd rather pursue direct-UE training, the
+concrete next step is a follow-up spike measuring step rate inside an
+actual running PIE/`-game` session -- say so and that's the next thing to
+build, not this fallback.
 
 ### Goal B: Repo restructure -- done
 
@@ -178,8 +193,11 @@ the base env) all pass.
 
 ### Open questions / deferred decisions
 
-1. **UE go/no-go** -- can't be made without the steps/sec measurement (see
-   Goal A above).
+1. **UE go/no-go** -- measured, but inconclusive (see Goal A above): the
+   number obtained isn't the one that determines training speed, and my
+   recommended fallback (PyBullet-primary, UE-for-rendering) is a
+   recommendation, not a decision made for you. Confirm or override it,
+   and say if you want the PIE-based follow-up spike instead.
 2. **Episodes essentially never terminate** in the current env/shield
    combination (see regression check above) -- not fixed this phase since
    phase 2 scope explicitly excludes redesigning env/shield logic, but
@@ -199,5 +217,9 @@ the base env) all pass.
   Phase 3 changes; it predates this restructure.
 - The current `SafetyShield` is still the phase-1 placeholder (random
   action near a hazard) -- real shield logic is explicitly Phase 3/5 scope.
-- The UE path is unvalidated. Don't assume UE is fast enough (or too slow)
-  for direct training until the spike in `ue_spike/` has actually been run.
+- Default to PyBullet as the training env (this session's recommendation
+  pending your sign-off, see Goal A above) with UE reserved for rendering.
+  Direct-UE training is not ruled out, but treat it as unvalidated until a
+  PIE-based follow-up spike measures real physics-tick throughput -- the
+  measurement taken this phase was call-overhead only, not representative
+  of training speed.
