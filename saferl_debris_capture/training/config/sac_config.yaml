@@ -1,0 +1,43 @@
+# SAC Training Configuration
+# SafeRL Debris Capture — Soft Actor-Critic
+
+# ── Policy Network ──────────────────────────────────────────────────────────
+sac:
+  learning_rate: 3.0e-4          # Adam learning rate (actor + critic + alpha)
+  buffer_size: 1000000           # replay buffer capacity
+  learning_starts: 10000         # env steps before first gradient update
+  batch_size: 512                # replay buffer mini-batch size
+  tau: 0.005                     # soft target update coefficient (Polyak)
+  gamma: 0.99                    # discount factor
+  train_freq: 1                  # update every N env steps
+  gradient_steps: 1              # gradient steps per update
+  ent_coef: "auto"               # "auto" = automatic entropy tuning
+  target_entropy: "auto"         # target entropy (−dim(A) by default)
+  use_sde: false                 # state-dependent exploration
+  action_noise_std: 0.0          # optional Gaussian exploration noise
+  net_arch: [256, 256, 128]      # shared trunk hidden layers
+
+# ── Training Schedule ────────────────────────────────────────────────────────
+total_timesteps: 3000000
+eval_freq: 20000                 # evaluate every N steps
+save_freq: 100000                # checkpoint every N steps
+
+# ── Curriculum ───────────────────────────────────────────────────────────────
+curriculum:
+  enabled: true
+  phase_1_steps: 500000          # easy: slow tumble, close start
+  phase_2_steps: 1500000         # medium: full tumble range
+  phase_3_steps: 3000000         # hard: full randomisation + noise
+
+# ── Reward weights ───────────────────────────────────────────────────────────
+reward:
+  w_approach:  1.0
+  w_align:     0.5
+  w_grasp:     1000.0
+  w_collision: -50.0
+  w_effort:    -0.01
+
+# ── Shield (only used if --shield flag is set) ────────────────────────────────
+shield:
+  safety_threshold: 0.05         # max P(collision) before intervention
+  table_path: "shield/prism_models/p_collision_table.npy"

@@ -1,0 +1,43 @@
+# PPO Training Configuration
+# SafeRL Debris Capture — Proximal Policy Optimisation
+
+# ── Policy Network ──────────────────────────────────────────────────────────
+ppo:
+  learning_rate: 3.0e-4          # Adam learning rate
+  n_steps: 2048                  # rollout steps per environment per update
+  batch_size: 256                # SGD mini-batch size
+  n_epochs: 10                   # optimisation epochs per update
+  gamma: 0.99                    # discount factor
+  gae_lambda: 0.95               # GAE smoothing parameter
+  clip_range: 0.2                # PPO clipping parameter
+  ent_coef: 0.005                # entropy bonus coefficient
+  vf_coef: 0.5                   # value function loss coefficient
+  max_grad_norm: 0.5             # gradient clipping norm
+  target_kl: 0.01                # early stopping KL threshold
+  net_arch: [256, 256, 128]      # shared trunk hidden layers
+
+# ── Training Schedule ────────────────────────────────────────────────────────
+total_timesteps: 5000000
+eval_freq: 50000                 # evaluate every N steps
+save_freq: 100000                # checkpoint every N steps
+n_envs: 8                        # parallel environments
+
+# ── Curriculum ───────────────────────────────────────────────────────────────
+curriculum:
+  enabled: true
+  phase_1_steps: 1000000         # easy: slow tumble, close start
+  phase_2_steps: 3000000         # medium: full tumble range
+  phase_3_steps: 5000000         # hard: full randomisation + noise
+
+# ── Reward weights ───────────────────────────────────────────────────────────
+reward:
+  w_approach:  1.0
+  w_align:     0.5
+  w_grasp:     1000.0
+  w_collision: -50.0
+  w_effort:    -0.01
+
+# ── Shield (only used if --shield flag is set) ────────────────────────────────
+shield:
+  safety_threshold: 0.05         # max P(collision) before intervention
+  table_path: "shield/prism_models/p_collision_table.npy"
