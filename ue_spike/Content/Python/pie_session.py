@@ -64,7 +64,13 @@ ACTION_TABLE = {
 }
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-RESULTS_PATH = os.path.normpath(os.path.join(_HERE, "..", "..", "pie_session_results.json"))
+
+# Phase 4 Goal B knobs. Defaults reproduce the phase 3 protocol exactly
+# (capped frame rate, one env step per rendered frame) so numbers compare.
+UNCAP_FRAMERATE = os.environ.get("SAFERL_UNCAP") == "1"
+STEPS_PER_TICK = int(os.environ.get("SAFERL_STEPS_PER_TICK", "1"))
+RESULTS_NAME = os.environ.get("SAFERL_RESULTS_NAME", "pie_session_results.json")
+RESULTS_PATH = os.path.normpath(os.path.join(_HERE, "..", "..", RESULTS_NAME))
 
 SPHERE = "/Engine/BasicShapes/Sphere.Sphere"
 CUBE = "/Engine/BasicShapes/Cube.Cube"
@@ -96,6 +102,17 @@ def _disable_background_throttle():
         _log("disabled throttle_cpu_when_not_foreground")
     except Exception as e:
         _log(f"could not disable background throttle: {e!r}")
+
+
+def _uncap_framerate(game_world):
+    """Remove the frame-rate ceiling so the tick loop is not pinned to a
+    display-refresh-shaped cap. Console CVars only -- no engine changes."""
+    for cmd in ("t.MaxFPS 0", "r.VSync 0", "Slate.AllowThrottling 0"):
+        try:
+            unreal.SystemLibrary.execute_console_command(game_world, cmd)
+            _log(f"applied CVar: {cmd}")
+        except Exception as e:
+            _log(f"CVar {cmd} failed (non-fatal): {e!r}")
 
 
 def _env_to_world(env_pos):
@@ -256,6 +273,7 @@ _state = {
     "handle": None,
     "pose_ticks": 0,
     "arrivals": 0,
+    "run_start_tick": 0,
 }
 
 
@@ -277,8 +295,11 @@ def _finish():
         "elapsed_seconds": elapsed,
         "steps_per_second": _state["count"] / elapsed if elapsed > 0 else float("inf"),
         "goal_arrivals": _state["arrivals"],
-        "mode": "live PIE session, full GUI editor, one env step per engine tick",
-        "note": "tick-bound: each step runs inside a slate post-tick callback while a "
+        "engine_ticks_used": _state["ticks"] - _state["run_start_tick"],
+        "steps_per_tick": STEPS_PER_TICK,
+        "framerate_uncapped": UNCAP_FRAMERATE,
+        "mode": "live PIE session, full GUI editor",
+        "note": "tick-bound: steps run inside a slate post-tick callback while a "
                 "real Play-In-Editor session renders, so this rate is capped by the "
                 "engine's actual frame rate -- unlike the phase 2 commandlet number, "
                 "which had no frame loop at all.",
@@ -324,6 +345,11 @@ def _on_tick(delta_seconds):
             _log(f"PIE is live, satellite found: {actor.get_name()}")
             _state["bridge"] = PIEBridge(game_world, actor)
             _state["bridge"].reset()
+            if UNCAP_FRAMERATE:
+                _uncap_framerate(game_world)
+            _log(f"protocol: {NUM_STEPS} steps, steps_per_tick={STEPS_PER_TICK}, "
+                 f"uncapped={UNCAP_FRAMERATE}")
+            _state["run_start_tick"] = _state["ticks"]
             _state["t0"] = time.perf_counter()
             _state["phase"] = "running"
             return
@@ -344,15 +370,18 @@ def _on_tick(delta_seconds):
             return
 
         bridge = _state["bridge"]
-        obs = bridge.step(bridge.action_toward_goal())
-        _state["count"] += 1
-
-        # a real episode boundary: on arrival, reset() and fly it again, so the
-        # loop exercises reset as well as step across the run
-        if bridge.at_goal():
-            _state["arrivals"] += 1
-            _log(f"satellite reached the goal ({_state['arrivals']}x) -- resetting")
-            bridge.reset()
+        # STEPS_PER_TICK > 1 decouples env stepping from the render rate: the
+        # engine still renders once, we advance the env several times.
+        for _ in range(STEPS_PER_TICK):
+            if _state["count"] >= NUM_STEPS:
+                break
+            obs = bridge.step(bridge.action_toward_goal())
+            _state["count"] += 1
+            # a real episode boundary: on arrival, reset() and fly it again, so
+            # the loop exercises reset as well as step across the run
+            if bridge.at_goal():
+                _state["arrivals"] += 1
+                bridge.reset()
 
         if _state["count"] % 100 == 0:
             _log(f"step {_state['count']}/{NUM_STEPS} satellite at {obs['position']}")

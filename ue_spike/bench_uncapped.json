@@ -1,0 +1,11 @@
+{
+  "num_steps": 500,
+  "elapsed_seconds": 4.202852274000179,
+  "steps_per_second": 118.96682714572582,
+  "goal_arrivals": 3,
+  "engine_ticks_used": 500,
+  "steps_per_tick": 1,
+  "framerate_uncapped": true,
+  "mode": "live PIE session, full GUI editor",
+  "note": "tick-bound: steps run inside a slate post-tick callback while a real Play-In-Editor session renders, so this rate is capped by the engine's actual frame rate -- unlike the phase 2 commandlet number, which had no frame loop at all."
+}
