@@ -392,3 +392,198 @@ question for you, not something this phase resolved.
 - The debris field is static in both backends. The UE scene uses five
   hardcoded debris positions in `pie_session.py`; the PyBullet env still
   randomizes hazard positions per episode with curriculum scaling.
+
+---
+
+## Phase 4 (2026-09-11): Dynamic debris field + UE throughput experiment
+
+### Goal A: dynamic debris field
+
+**Motion model.** Each hazard is assigned a random heading and a speed drawn
+from `[debris_min_speed, debris_max_speed]` (default `0.3` - `1.2` env
+units/sec) at spawn, then drifts linearly. Position advances by
+`velocity * step_dt` each `step()`, where `step_dt = sim_substeps / 240Hz`
+(0.0417s with the current config) so debris motion shares the agent's
+control timescale rather than running on an unrelated clock. Hazard bodies
+are set to **mass 0 and driven kinematically** — otherwise gravity drops
+them and contact impulses knock them off their assigned trajectories.
+
+**Boundary behaviour: reflection (bounce).** Debris reflect off the edges of
+the `[0, size]` play area, with both position mirrored and velocity
+negated. Reasons for picking this over the alternatives: it keeps the debris
+count and therefore the observation layout constant (wrapping and
+despawn/respawn both do too, but), and unlike wrapping it never teleports an
+object across the field into the agent's path. A wrapped object appearing
+adjacent to the agent produces an unavoidable collision — no policy and no
+shield could have prevented it — which would inject noise into exactly the
+safety signal phase 5's shield has to learn from. Despawn/respawn has the
+same problem plus a spawn-placement rule to get wrong.
+
+**Observation space: 24 → 39.** Each hazard block is now `[pos(3), vel(3)]`
+instead of `[pos(3)]`, so the policy can see motion instead of inferring it.
+`OBS_HEADER_LEN` (9) and `OBS_PER_HAZARD` (6) are exported from
+`saferl/env/base_env.py` so the layout has exactly one definition;
+`SafetyShield` imports them rather than hardcoding a stride. The shield's
+*logic* is untouched — still a position-only distance check that picks a
+random action — only its indexing moved onto the new stride. Relative
+velocity / time-to-collision reasoning is phase 5's job.
+
+**Collision check uses live positions.** `_advance_hazards()` runs before
+both `_get_obs()` and the collision check, so both read this step's state.
+This is covered by a test that parks a hazard on the agent mid-episode and
+asserts the next step terminates — it fails if either path ever goes back to
+reading a reset-time snapshot.
+
+**Curriculum on debris speed: implemented, not deferred.** Matching the
+existing hazard-count ramp, when `curriculum` is on the *upper* speed bound
+ramps from `debris_min_speed` to `debris_max_speed` over
+`debris_speed_ramp_episodes` (default 200). Early episodes face near-static
+debris; later ones face the full speed band. The lower bound stays fixed so
+there is always some motion to react to.
+
+**Tests: 8 new, 17 total, all passing.** Debris actually move between steps
+(catches "velocity stored but never applied"), obs tracks live debris
+position and velocity, the collision check uses current positions, boundary
+reflection keeps every hazard inside the play area across 200 steps, obs
+shape matches the new size, PPO builds and predicts against the widened obs
+without crashing, and both curriculum speed paths.
+
+**Training regression:** 30k timesteps, no crash, **30 completed episodes**
+and the metrics plot written (phase 3's fixed baseline was 34). As expected,
+nobody is dodging anything yet — sampling a random policy over 40 episodes
+gives 1 goal / 4 crashes / 35 truncations at ~907 mean episode length.
+Moving debris does produce real collisions now, which static debris plus the
+deflecting shield largely prevented.
+
+### Goal A: shield-relevant content extracted from the Isaac Lab / PRISM files
+
+Read from `saferl_debris_capture/shield/` and `SafeRL_SpaceDebris_Project.md`
+directly rather than from phase 3's one-line summary. The stack (Isaac Lab)
+is dead per your call, but the **shield design is stack-independent** and
+phase 5 should start from it rather than from scratch. What is actually
+specified there:
+
+**1. Three-stage architecture.** `abstraction.py` → `shield_query.py` →
+`shield_wrapper.py`: map the continuous observation into a small discrete
+state, look up a model-checked probability for each (state, action), and
+allow-or-override at runtime. Each stage is independently replaceable.
+
+**2. Abstract state `(d, f, t)` — 45 states.** Distance bucket `d ∈ 0..4`
+(0 = contact, 4 = far), contact-force bucket `f ∈ 0..2` (0 = safe,
+2 = overload), tumble-rate bucket `t ∈ 0..2`. **Translation needed for this
+repo:** `f` (contact force) and `t` (tumbling) don't exist in the navigation
+task. The natural analogues are distance-to-nearest-debris and a
+**closing-rate / time-to-collision bucket** — which is precisely what the
+debris velocity added in this phase now makes computable.
+
+**3. Conservative abstraction rule.** When a continuous value sits near a
+bucket boundary, round toward the **more dangerous** bucket, so the shield is
+never over-optimistic. Cheap to implement, and worth carrying over verbatim.
+
+**4. Safety spec in PCTL, quantitative and checkable:**
+`P<=0.05 [ F<=20 "collision" ]` (collision probability within 20 steps ≤ 5%)
+and `P>=0.90 [ F<=50 "captured" ]` (task success within 50 steps ≥ 90%).
+Having a written, falsifiable spec is the part the current placeholder
+shield most obviously lacks.
+
+**5. Override rule: least-restrictive safe action.** If
+`P(collision | state, action) > threshold` (default 0.05), substitute the
+action that minimises collision probability **while still making progress** —
+explicitly not a random action. This is the single biggest delta from this
+repo's current shield, which picks uniformly at random from all four
+directions and can therefore steer *into* a hazard.
+
+**6. Offline table vs online PRISM.** The design precomputes a
+`(num_states, num_actions)` probability table offline and loads it as a
+numpy array — zero subprocess overhead per step. Online PRISM invocation is
+~100ms/call, which it flags as offline-analysis-only. At ~1090 steps/sec in
+PyBullet, anything but a table lookup is a non-starter in the training loop.
+
+**7. Transition probabilities calibrated from rollouts**, not hand-waved:
+the `.pm` file's constants are annotated as estimated from offline rollouts
+of the dynamics model, with a `shield/estimate_transitions.py` step in the
+plan to produce them.
+
+**8. Structured intervention logging** — each intervention records state,
+proposed action, substituted action, collision probability and threshold.
+This repo currently keeps only an integer counter.
+
+**9. References the design cites:** Jansen et al., *Safe Reinforcement
+Learning Using Probabilistic Shields* (CONCUR 2020); Hasanbeig et al.,
+*Cautious Reinforcement Learning with Logical Constraints* (AAMAS 2020).
+
+Nothing from these files was implemented this phase, per scope.
+
+### Goal B: UE throughput experiment
+
+Same 500-step protocol as phase 3, four configurations. `pie_session.py`
+gained `SAFERL_UNCAP`, `SAFERL_STEPS_PER_TICK` and `SAFERL_RESULTS_NAME`;
+defaults reproduce the phase 3 protocol exactly.
+
+| configuration | steps/sec | world ticks for 500 steps | world ticks/sec |
+|---|---|---|---|
+| capped + throttled, 1 step/tick | 4.2 | 500 | 4.2 |
+| **uncapped, 1 step/tick** | **119.0** | 500 | **119.0** |
+| uncapped, 10 steps/tick | 1117.3 | 50 | 111.7 |
+| uncapped, 50 steps/tick | 4426.3 | 10 | 88.5 |
+| *(PyBullet, for reference)* | *~1090* | — | — |
+
+**Two findings, and the second is the one that matters.**
+
+First, phase 3's 119/s was measured with the editor window focused.
+Unfocused, the editor throttles to **4.2 steps/sec**. `Slate.AllowThrottling 0`
+(alongside `t.MaxFPS 0` and `r.VSync 0`) makes 119/s reproducible regardless
+of focus. So 119 was a real number, but it needs those CVars to be dependable
+— use `SAFERL_UNCAP=1` for any future measurement.
+
+Second: **the frame-rate ceiling is not soft, and batching does not lift it.**
+Look at the last column — world ticks/sec stays flat at 88-119 across every
+configuration. Stepping 10 or 50 times per rendered frame does not make UE
+simulate faster; it performs more Python-side transform writes *between* the
+same ~119 frames. Those extra steps advance no UE physics at all, which is
+exactly the caveat that made phase 2's 180,000/s number meaningless.
+
+So: if an env step has to advance UE's own physics — the entire premise of
+using UE as the simulator rather than a renderer — **~119 steps/sec is the
+real ceiling**, roughly 9x slower than PyBullet, the same ratio phase 3
+reported. **The phase 2/3 recommendation stands: train in PyBullet, use UE
+for rendering and demo playback.** I did not change the backend, and there is
+no new evidence here that would justify revisiting it. Per the time-box, I
+stopped after one clean measurement set rather than chasing exotic tuning.
+
+### Open questions / deferred decisions
+
+1. **Debris speed band** (`0.3` - `1.2` env units/sec) was chosen to be
+   visibly dynamic without being unavoidable, not calibrated against
+   anything physical. If you want Kuiper-belt-realistic relative velocities,
+   that is a modelling decision worth making deliberately in phase 5 or 6.
+2. **Debris motion is linear, not orbital.** No gravity wells, no relative
+   orbital mechanics, and debris pass through each other. Fine for a
+   reaction-to-motion task; flagged in case the realism matters later.
+3. **The reward is unchanged** and still gives no credit for near-miss
+   avoidance, so with moving debris the agent is scored almost entirely on
+   goal-reaching and crashes. Worth revisiting alongside the shield.
+4. **Untouched from phase 3:** the shield is still the random-action
+   placeholder, and the action space is still `Discrete(4)`.
+
+### What Phase 5 (shield redesign) should assume
+
+- **Debris move, and the observation carries their velocity.** Obs is 39-wide
+  for `max_hazards=5`: `[agent_pos(3), agent_vel(3), goal_pos(3)]` then
+  `[pos(3), vel(3)]` per hazard. Use `OBS_HEADER_LEN` / `OBS_PER_HAZARD` from
+  `saferl.env.base_env` rather than hardcoding offsets — changing the layout
+  again means changing them in one place.
+- **Closing rate is now computable** from the observation, so a
+  time-to-collision shield is buildable without touching the env.
+- **The shield redesign has a prior design to start from**, summarised above:
+  conservative abstraction, a PCTL safety spec, a precomputed probability
+  table, and least-restrictive-safe-action overrides instead of random ones.
+  The random-action placeholder is actively harmful with moving debris — it
+  can steer into a hazard — so replacing the override rule is the highest-value
+  single change.
+- **Training stays in PyBullet** (~1090 steps/sec), measured again this phase.
+  UE remains rendering/demo only, at a confirmed ~119 steps/sec ceiling.
+- **Any UE session needs `SAFERL_UNCAP=1`** to avoid the 4.2/s background
+  throttle, plus `-nosound` and arming via `init_unreal.py`.
+- Episode termination, the friction fix and the truncation backstop from
+  phase 3 are all intact and covered by tests (17 passing).
