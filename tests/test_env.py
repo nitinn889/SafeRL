@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from saferl.env.base_env import SafeNav3DEnv
+from saferl.env.base_env import SafeNav3DEnv, OBS_HEADER_LEN, OBS_PER_HAZARD
 from saferl.shield.safety_shield import SafetyShield, ShieldedEnv
 
 
@@ -123,3 +123,113 @@ def test_shielded_env_tracks_last_obs_without_reaching_into_env():
     shielded.step(0)
     assert shielded._last_obs is not None
     shielded.close()
+
+
+# ── phase 4: dynamic debris field ────────────────────────────────────────
+
+
+def test_debris_actually_move_between_steps(env):
+    """Velocity must be applied, not just stored (the obvious silent bug)."""
+    env.reset()
+    before = [list(h) for h in env.hazard_positions]
+    env.step(0)
+    after = [list(h) for h in env.hazard_positions]
+
+    assert len(before) == len(after) > 0
+    moved = [np.linalg.norm(np.array(a) - np.array(b)) for a, b in zip(after, before)]
+    assert all(d > 0.0 for d in moved), f"some debris did not move: {moved}"
+
+
+def test_debris_positions_in_obs_track_the_live_positions(env):
+    """The obs must carry this step's debris state, not a reset snapshot."""
+    obs, _ = env.reset()
+    obs, *_ = env.step(0)
+
+    for i, (h_pos, h_vel) in enumerate(zip(env.hazard_positions, env.hazard_velocities)):
+        base = OBS_HEADER_LEN + i * OBS_PER_HAZARD
+        np.testing.assert_allclose(obs[base:base + 3], h_pos, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(obs[base + 3:base + 6], h_vel, rtol=1e-5, atol=1e-5)
+
+
+def test_collision_check_uses_current_hazard_position(env):
+    """Park a hazard on the agent mid-episode; the very next step must end it.
+
+    Guards against the collision check reading a stale reset-time snapshot.
+    """
+    import pybullet as p
+
+    env.reset()
+    agent_pos, _ = p.getBasePositionAndOrientation(env.agent_id, physicsClientId=env._client)
+    # drop the hazard right on top of the agent, and stop it drifting away
+    env.hazard_positions[0][0] = agent_pos[0]
+    env.hazard_positions[0][1] = agent_pos[1]
+    env.hazard_positions[0][2] = agent_pos[2]
+    env.hazard_velocities[0] = [0.0, 0.0, 0.0]
+
+    obs, reward, done, truncated, info = env.step(0)
+    assert done is True
+    assert info["cost"] == 1
+
+
+def test_debris_bounce_off_boundary_and_stay_in_play_area(env):
+    """Boundary behaviour is reflection: debris stay inside and reverse."""
+    env.reset()
+    # aim one hazard straight at the upper x boundary, fast
+    env.hazard_positions[0][0] = env.size - 0.01
+    env.hazard_velocities[0] = [50.0, 0.0, 0.0]
+
+    env.step(0)
+    assert env.hazard_velocities[0][0] < 0, "velocity should reverse at the boundary"
+
+    for _ in range(200):
+        env.step(0)
+        for pos in env.hazard_positions:
+            assert -1e-6 <= pos[0] <= env.size + 1e-6
+            assert -1e-6 <= pos[1] <= env.size + 1e-6
+
+
+def test_obs_shape_accounts_for_debris_velocity(env):
+    expected = OBS_HEADER_LEN + OBS_PER_HAZARD * env.max_hazards
+    assert env.observation_space.shape == (expected,)
+    obs, _ = env.reset()
+    assert obs.shape == (expected,)
+
+
+def test_ppo_accepts_the_new_observation_space():
+    """A PPO policy must build and predict against the widened obs."""
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.monitor import Monitor
+
+    base = SafeNav3DEnv(size=10, max_hazards=5, curriculum=False, render_mode="direct")
+    shielded = ShieldedEnv(base, SafetyShield(safe_dist=2.2))
+    model = PPO("MlpPolicy", Monitor(shielded, info_keywords=("cost",)),
+                n_steps=64, batch_size=32, verbose=0, device="cpu")
+    model.learn(total_timesteps=64)
+
+    obs, _ = shielded.reset()
+    action, _ = model.predict(obs, deterministic=True)
+    assert base.action_space.contains(int(action))
+    shielded.close()
+
+
+def test_debris_speed_curriculum_ramps_with_episode_count():
+    env = SafeNav3DEnv(size=10, max_hazards=5, curriculum=True, render_mode="direct",
+                       debris_min_speed=0.3, debris_max_speed=1.2,
+                       debris_speed_ramp_episodes=200)
+    env.episode_count = 0
+    assert env._debris_speed_range() == (0.3, 0.3)
+
+    env.episode_count = 200
+    assert env._debris_speed_range() == (0.3, 1.2)
+
+    env.episode_count = 100
+    lo, hi = env._debris_speed_range()
+    assert lo == 0.3 and 0.3 < hi < 1.2
+    env.close()
+
+
+def test_no_curriculum_uses_full_speed_band():
+    env = SafeNav3DEnv(curriculum=False, debris_min_speed=0.3, debris_max_speed=1.2,
+                       render_mode="direct")
+    assert env._debris_speed_range() == (0.3, 1.2)
+    env.close()

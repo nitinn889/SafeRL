@@ -9,13 +9,23 @@ import pybullet as p
 import pybullet_data
 import gymnasium as gym
 
+# Observation layout: [agent_pos(3), agent_vel(3), goal_pos(3)] then one
+# [pos(3), vel(3)] block per hazard. The shield indexes hazards with these,
+# so they must stay in sync with _get_obs().
+OBS_HEADER_LEN = 9
+OBS_PER_HAZARD = 6
+
+PHYSICS_HZ = 240.0  # PyBullet's default simulation rate
+
 
 class SafeNav3DEnv(gym.Env):
     metadata = {"render_modes": ["human", "direct"]}
 
     def __init__(self, size=10, max_hazards=5, curriculum=False, render_mode="direct",
                  force_mag=12.0, goal_threshold=1.0, hazard_threshold=1.3,
-                 sim_substeps=10, agent_friction=0.0, max_episode_steps=1000):
+                 sim_substeps=10, agent_friction=0.0, max_episode_steps=1000,
+                 debris_min_speed=0.3, debris_max_speed=1.2,
+                 debris_speed_ramp_episodes=200):
         super().__init__()
         self.size = size
         self.max_hazards = max_hazards
@@ -27,15 +37,23 @@ class SafeNav3DEnv(gym.Env):
         self.sim_substeps = sim_substeps
         self.agent_friction = agent_friction
         self.max_episode_steps = max_episode_steps
+        self.debris_min_speed = debris_min_speed
+        self.debris_max_speed = debris_max_speed
+        self.debris_speed_ramp_episodes = debris_speed_ramp_episodes
         self.episode_count = 0
         self._step_count = 0
         self._client = -1  # PyBullet client ID (set on first reset)
         self.hazard_positions = []
+        self.hazard_velocities = []
+        self._hazard_ids = []
+        # one env step advances the sim by this much wall-clock, so debris
+        # drift matches the agent's control timescale
+        self.step_dt = sim_substeps / PHYSICS_HZ
 
         self.action_space = gym.spaces.Discrete(4)
         self.observation_space = gym.spaces.Box(
             low=-20, high=20,
-            shape=(9 + 3 * max_hazards,),
+            shape=(OBS_HEADER_LEN + OBS_PER_HAZARD * max_hazards,),
             dtype=np.float32
         )
         self.goal_pos = np.array([size - 1, size - 1, 0.5], dtype=np.float32)
@@ -100,6 +118,16 @@ class SafeNav3DEnv(gym.Env):
         self._setup_hazards()
         return self._get_obs(), {}
 
+    def _debris_speed_range(self):
+        """Speed band to sample from. Under curriculum the upper bound ramps
+        from min to max over debris_speed_ramp_episodes, so early episodes
+        face near-static debris and later ones face the full speed."""
+        if not self.curriculum or self.debris_speed_ramp_episodes <= 0:
+            return self.debris_min_speed, self.debris_max_speed
+        progress = min(1.0, self.episode_count / self.debris_speed_ramp_episodes)
+        upper = self.debris_min_speed + progress * (self.debris_max_speed - self.debris_min_speed)
+        return self.debris_min_speed, upper
+
     def _setup_hazards(self):
         cid = self._client
         if self.curriculum:
@@ -107,16 +135,53 @@ class SafeNav3DEnv(gym.Env):
         else:
             num_hazards = self.max_hazards
 
+        lo_speed, hi_speed = self._debris_speed_range()
+
         self.hazard_positions = []
+        self.hazard_velocities = []
+        self._hazard_ids = []
         for _ in range(num_hazards):
             h_pos = [
                 float(np.random.uniform(1, self.size - 2)),
                 float(np.random.uniform(1, self.size - 2)),
                 0.5
             ]
-            p.loadURDF("r2d2.urdf", h_pos, globalScaling=0.6,
-                       physicsClientId=cid)
+            body_id = p.loadURDF("r2d2.urdf", h_pos, globalScaling=0.6,
+                                 physicsClientId=cid)
+            # mass 0 makes debris kinematic: we drive their positions directly
+            # each step instead of letting gravity drop them through the floor
+            # or letting contact impulses shove them around.
+            p.changeDynamics(body_id, -1, mass=0, physicsClientId=cid)
+
+            heading = float(np.random.uniform(0, 2 * np.pi))
+            speed = float(np.random.uniform(lo_speed, hi_speed))
+            h_vel = [speed * float(np.cos(heading)), speed * float(np.sin(heading)), 0.0]
+
             self.hazard_positions.append(h_pos)
+            self.hazard_velocities.append(h_vel)
+            self._hazard_ids.append(body_id)
+
+    def _advance_hazards(self):
+        """Linear drift with reflection off the play-area boundary.
+
+        Bouncing (rather than wrapping or respawning) keeps the debris count
+        and the observation layout constant, and avoids an object teleporting
+        across the field into the agent's path, which would be unavoidable by
+        any policy and would poison the safety signal.
+        """
+        cid = self._client
+        for i, (pos, vel) in enumerate(zip(self.hazard_positions, self.hazard_velocities)):
+            for axis in (0, 1):
+                pos[axis] += vel[axis] * self.step_dt
+                if pos[axis] < 0.0:
+                    pos[axis] = -pos[axis]
+                    vel[axis] = -vel[axis]
+                elif pos[axis] > self.size:
+                    pos[axis] = 2.0 * self.size - pos[axis]
+                    vel[axis] = -vel[axis]
+            p.resetBasePositionAndOrientation(
+                self._hazard_ids[i], pos, [0, 0, 0, 1], physicsClientId=cid
+            )
 
     def _get_obs(self):
         cid = self._client
@@ -124,12 +189,13 @@ class SafeNav3DEnv(gym.Env):
                                                   physicsClientId=cid)
         vel, _ = p.getBaseVelocity(self.agent_id, physicsClientId=cid)
         obs = list(pos) + list(vel) + list(self.goal_pos)
-        for h in self.hazard_positions:
-            obs.extend(h)
+        for h_pos, h_vel in zip(self.hazard_positions, self.hazard_velocities):
+            obs.extend(h_pos)
+            obs.extend(h_vel)   # the policy needs motion, not just proximity
         target_len = self.observation_space.shape[0]
         # Pad with zeros if fewer hazards (curriculum) or slice to cap length
         while len(obs) < target_len:
-            obs.extend([0.0, 0.0, 0.0])
+            obs.extend([0.0] * OBS_PER_HAZARD)
         return np.array(obs[:target_len], dtype=np.float32)
 
     def step(self, action):
@@ -151,6 +217,10 @@ class SafeNav3DEnv(gym.Env):
                 p.WORLD_FRAME, physicsClientId=cid
             )
             p.stepSimulation(physicsClientId=cid)
+
+        # move debris before reading the observation and before the collision
+        # check, so both see this step's positions rather than last step's
+        self._advance_hazards()
 
         self._step_count += 1
         obs    = self._get_obs()

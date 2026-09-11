@@ -8,6 +8,8 @@ phase 3/5) and is preserved as-is.
 import numpy as np
 import gymnasium as gym
 
+from saferl.env.base_env import OBS_HEADER_LEN, OBS_PER_HAZARD
+
 
 class SafetyShield:
     def __init__(self, safe_dist=2.2):
@@ -15,7 +17,9 @@ class SafetyShield:
 
     def check_and_fix(self, obs, action):
         pos = obs[0:3]
-        for i in range(9, len(obs), 3):
+        # each hazard block is [pos(3), vel(3)]; this still only looks at
+        # position -- using relative velocity is phase 5's redesign
+        for i in range(OBS_HEADER_LEN, len(obs), OBS_PER_HAZARD):
             h_pos = obs[i:i + 3]
             if np.all(h_pos == 0):
                 continue

@@ -15,6 +15,13 @@ env:
   agent_friction: 0.0
   # backstop for a wandering policy; goal/collision termination is unaffected
   max_episode_steps: 1000
+  # debris drift speed in env units/sec; each hazard gets a random heading and
+  # a speed sampled from this band, and bounces off the play-area boundary
+  debris_min_speed: 0.3
+  debris_max_speed: 1.2
+  # with curriculum on, the upper speed bound ramps from min to max over this
+  # many episodes, so early training sees near-static debris
+  debris_speed_ramp_episodes: 200
 
 shield:
   safe_dist: 2.2
