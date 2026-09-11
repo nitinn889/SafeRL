@@ -6,6 +6,15 @@ env:
   force_mag: 12.0
   goal_threshold: 1.0
   hazard_threshold: 1.3
+  # physics substeps per env step: thrust is held across all of them, so the
+  # control rate (~24Hz) is decoupled from PyBullet's 240Hz physics rate
+  sim_substeps: 10
+  # 0.0 = frictionless, as a satellite should be; sphere2.urdf's default 0.5
+  # against its 10kg mass produces ~49N of static friction vs 12N of thrust,
+  # which pins the agent in place and prevents any episode from terminating
+  agent_friction: 0.0
+  # backstop for a wandering policy; goal/collision termination is unaffected
+  max_episode_steps: 1000
 
 shield:
   safe_dist: 2.2

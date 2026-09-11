@@ -14,7 +14,8 @@ class SafeNav3DEnv(gym.Env):
     metadata = {"render_modes": ["human", "direct"]}
 
     def __init__(self, size=10, max_hazards=5, curriculum=False, render_mode="direct",
-                 force_mag=12.0, goal_threshold=1.0, hazard_threshold=1.3):
+                 force_mag=12.0, goal_threshold=1.0, hazard_threshold=1.3,
+                 sim_substeps=10, agent_friction=0.0, max_episode_steps=1000):
         super().__init__()
         self.size = size
         self.max_hazards = max_hazards
@@ -23,7 +24,11 @@ class SafeNav3DEnv(gym.Env):
         self.force_mag = force_mag
         self.goal_threshold = goal_threshold
         self.hazard_threshold = hazard_threshold
+        self.sim_substeps = sim_substeps
+        self.agent_friction = agent_friction
+        self.max_episode_steps = max_episode_steps
         self.episode_count = 0
+        self._step_count = 0
         self._client = -1  # PyBullet client ID (set on first reset)
         self.hazard_positions = []
 
@@ -72,6 +77,14 @@ class SafeNav3DEnv(gym.Env):
         )
         p.changeVisualShape(self.agent_id, -1, rgbaColor=[0, 0, 1, 1],
                             physicsClientId=cid)
+        # sphere2.urdf is 10kg with lateralFriction 0.5; against gravity that
+        # is ~49N of static friction, four times the thrust the action set can
+        # produce, so the agent would weld itself to the plane and no episode
+        # could ever terminate. A satellite has no ground to rub against.
+        p.changeDynamics(self.agent_id, -1,
+                         lateralFriction=self.agent_friction,
+                         linearDamping=0.0, angularDamping=0.0,
+                         physicsClientId=cid)
 
         goal_vis = p.createVisualShape(
             p.GEOM_SPHERE, radius=0.6, rgbaColor=[0, 1, 0, 0.5],
@@ -83,6 +96,7 @@ class SafeNav3DEnv(gym.Env):
         )
 
         self.episode_count += 1
+        self._step_count = 0
         self._setup_hazards()
         return self._get_obs(), {}
 
@@ -127,12 +141,18 @@ class SafeNav3DEnv(gym.Env):
         elif action == 2: force[0] = -mag
         elif action == 3: force[0] =  mag
 
-        p.applyExternalForce(
-            self.agent_id, -1, force, [0, 0, 0],
-            p.WORLD_FRAME, physicsClientId=cid
-        )
-        p.stepSimulation(physicsClientId=cid)
+        # applyExternalForce only lasts a single substep, so one env step held
+        # thrust for 1/240s -- 0.005 m/s of delta-v, far too little to cross the
+        # field. Hold it across sim_substeps instead, decoupling the control
+        # rate (~24Hz) from the physics rate (240Hz).
+        for _ in range(self.sim_substeps):
+            p.applyExternalForce(
+                self.agent_id, -1, force, [0, 0, 0],
+                p.WORLD_FRAME, physicsClientId=cid
+            )
+            p.stepSimulation(physicsClientId=cid)
 
+        self._step_count += 1
         obs    = self._get_obs()
         reward = -0.1
         cost   = 0
@@ -150,4 +170,8 @@ class SafeNav3DEnv(gym.Env):
                     done   = True
                     break
 
-        return obs, reward, done, False, {"cost": cost}
+        # truncation is a backstop for a wandering policy, not the termination
+        # path: goal/collision above still end the episode on their own.
+        truncated = (not done) and self._step_count >= self.max_episode_steps
+
+        return obs, reward, done, truncated, {"cost": cost}

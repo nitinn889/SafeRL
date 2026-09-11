@@ -20,15 +20,7 @@ sns.set_theme(style="darkgrid")
 def make_env(cfg):
     """Factory function (not a lambda) so DummyVecEnv can create fresh envs."""
     def _factory():
-        base = SafeNav3DEnv(
-            size=cfg["env"]["size"],
-            max_hazards=cfg["env"]["max_hazards"],
-            curriculum=cfg["env"]["curriculum"],
-            render_mode="direct",
-            force_mag=cfg["env"]["force_mag"],
-            goal_threshold=cfg["env"]["goal_threshold"],
-            hazard_threshold=cfg["env"]["hazard_threshold"],
-        )
+        base = SafeNav3DEnv(render_mode="direct", **cfg["env"])
         shield = SafetyShield(safe_dist=cfg["shield"]["safe_dist"])
         shielded = ShieldedEnv(base, shield)
         return Monitor(shielded, info_keywords=("cost",))

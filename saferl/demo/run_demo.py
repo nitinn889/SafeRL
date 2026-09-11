@@ -12,15 +12,7 @@ def run_demo(model_path="saferl_model.zip", config_path=None):
     cfg = load_config(config_path)
     model = PPO.load(model_path)
 
-    demo_env = SafeNav3DEnv(
-        size=cfg["env"]["size"],
-        max_hazards=cfg["env"]["max_hazards"],
-        curriculum=cfg["env"]["curriculum"],
-        render_mode="human",
-        force_mag=cfg["env"]["force_mag"],
-        goal_threshold=cfg["env"]["goal_threshold"],
-        hazard_threshold=cfg["env"]["hazard_threshold"],
-    )
+    demo_env = SafeNav3DEnv(render_mode="human", **cfg["env"])
     obs, _ = demo_env.reset()
     fps = cfg["demo"]["fps"]
     for _ in range(cfg["demo"]["steps"]):
