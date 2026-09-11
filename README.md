@@ -223,3 +223,172 @@ the base env) all pass.
   PIE-based follow-up spike measures real physics-tick throughput -- the
   measurement taken this phase was call-overhead only, not representative
   of training speed.
+
+---
+
+## Phase 3 (2026-09-11): UE Editor + PIE live, episode-termination fix, untracked files landed
+
+### Goal A: UE Editor + PIE running with the environment visible -- achieved
+
+The full Unreal Editor GUI comes up (Vulkan, real rendering -- not headless,
+not `-nullrhi`, not a commandlet), spawns the satellite, five debris cubes,
+a goal marker and a light, starts a real Play-In-Editor session, and drives
+the phase 2 `reset()`/`step()` loop against the PIE-world actor.
+
+Run it with:
+```bash
+SAFERL_RUN_PIE=1 /mnt/bigdata/unreal_engine/Engine/Binaries/Linux/UnrealEditor \
+    ue_spike/SafeRLUESpike.uproject -nosound -log
+```
+`init_unreal.py` picks up `SAFERL_RUN_PIE=1` and arms
+[`ue_spike/Content/Python/pie_session.py`](ue_spike/Content/Python/pie_session.py).
+Launched natively, not through Docker -- the engine on `/mnt/bigdata` runs
+directly and no container was needed.
+
+**Measured tick-bound rate: ~119 steps/sec** (500 steps in 4.20s;
+reproduced at 118.4 / 119.1 / 119.0 across three runs, recorded in
+[`ue_spike/pie_session_results.json`](ue_spike/pie_session_results.json)).
+The session stayed alive well past the 500-step requirement, and the loop
+exercised `reset()` too: the satellite reached the goal and reset 3 times
+during the run. This is the number phase 2 could not get -- one env step
+per rendered engine frame, capped by the actual frame rate.
+
+Visual record, rendered by the engine itself during the live session:
+![live PIE session](ue_spike/pie_session_midrun.png)
+([`pie_session_midrun.png`](ue_spike/pie_session_midrun.png),
+[`pie_session_final.png`](ue_spike/pie_session_final.png)) -- the large
+sphere is the goal marker, the smaller sphere the satellite mid-traverse,
+and the five cubes are the debris field. These are `SceneCapture2D` renders
+rather than desktop screenshots: this host is Wayland, and X11 screen grabs
+of the editor window come back solid black.
+
+**Does this change the phase 2 recommendation? No -- it confirms it, and now
+on real evidence rather than a guess.** At 119 steps/sec:
+
+| | 30k steps (current default) | 1M steps |
+|---|---|---|
+| UE live PIE | ~4.2 min | ~2.3 hours |
+| PyBullet (measured, phase 2 + re-run this phase) ~1090/s | ~28 sec | ~15 min |
+
+UE is ~9x slower, which is survivable for a 30k demo run but not for the
+step budgets a real safe-RL curriculum wants. So: **keep training in
+PyBullet, use UE for rendering and demo playback** -- same recommendation
+as phase 2, now measured rather than assumed. Two caveats worth your
+judgement before treating 119/s as a hard ceiling: it is one env step per
+*rendered* frame, so uncapping the frame rate, running several env steps
+per tick, or suppressing rendering during training could each raise it;
+and this is still kinematic actor movement, not UE rigid-body physics
+under load. **Confirm or override this and I will follow it** -- I have not
+changed direction on my own.
+
+Phase 2 got one conclusion wrong and this phase corrects it: the editor
+self-terminating after 1-2 ticks had nothing to do with `-nullrhi` "having
+nothing to keep it alive". It is `-ExecutePythonScript`, which quits the
+editor as soon as the script returns -- it does exactly the same thing in a
+full GUI session. Arming from `init_unreal.py` instead keeps the session
+alive indefinitely.
+
+Other things worth knowing about running UE this way on this host:
+- PIE hangs during audio device init (SDL/pulseaudio); `-nosound` avoids it.
+- A `SceneCapture2D` holding a 1920x1080 target re-renders the scene every
+  frame and drags the loop from ~119 to ~6 steps/sec. Screenshots are taken
+  after the timed run, never during it.
+- UE's log buffering stalls under load and makes a perfectly healthy run
+  look hung. The session mirrors progress to `ue_spike/pie_heartbeat.log`
+  (gitignored) so you can watch it from outside the engine.
+
+### Goal B: episode-termination bug root-caused and fixed
+
+**Root cause was the physics, not the wrappers.** The termination checks in
+`env/base_env.py` were correct and nothing was dropping `done` in
+`ShieldedEnv` or `Monitor`. The agent simply could not move:
+`sphere2.urdf` loads at **10kg with lateralFriction 0.5**, so once it
+settles onto the ground plane it sits behind **~49N of static friction**
+while the 4-action set can only produce **12N** of thrust. Measured
+directly: under constant thrust the agent travels 0.03 units, and its
+velocity is then exactly 0.000 for the rest of the run. Neither the goal
+check (12.7 units away) nor the collision check could ever fire -- on any
+physics backend.
+
+Compounding it, `applyExternalForce` only persists for a single substep, so
+one env step held thrust for 1/240s -- about 0.005 m/s of delta-v.
+
+Fixed at the root, both in the env and both config-driven:
+- `agent_friction` (default `0.0`) -- a satellite has no ground to rub
+  against; the ground plane is an artifact of the toy env.
+- `sim_substeps` (default `10`) -- hold thrust across substeps, decoupling
+  the ~24Hz control rate from PyBullet's 240Hz physics rate.
+
+`max_episode_steps` (default `1000`) was added **as well**, not instead:
+it returns `truncated=True`, never `done=True`, so a wandering policy gets
+an episode boundary while genuine goal/collision termination stays
+distinguishable from it.
+
+New regression tests in `tests/test_env.py`, all passing (9 total):
+- `test_goal_reached_terminates` -- teleport onto the goal, assert `done`
+- `test_hazard_collision_terminates` -- teleport onto a hazard, assert
+  `done` and `cost == 1`
+- `test_agent_actually_moves` -- sustained thrust must displace the agent
+  (the direct guard against the friction lock recurring)
+- `test_truncation_fires_without_terminating`
+
+**Training regression re-run** (30k timesteps, PyBullet, default config):
+**34 completed episodes** and the metrics plot generated, against **0
+episodes and no plot** before the fix. `ep_len_mean` settles around 900,
+i.e. most episodes still end at the truncation cap rather than on the goal
+-- expected for an untrained policy over 30k steps with the shield
+deflecting it away from hazards, and worth revisiting when the real shield
+lands.
+
+### Goal C: untracked files landed, unmodified
+
+Both were added exactly as they were, at their existing top-level paths,
+with no edits and nothing folded into `saferl/`. At a glance:
+
+- **`SafeRL_SpaceDebris_Project.md`** -- 41KB / 1128-line research and
+  development plan: "Probabilistic Shield-Augmented Reinforcement Learning
+  for Autonomous Capture of Tumbling Space Debris". Abstract, MDP
+  formulation, probabilistic shielding theory, tumbling dynamics, and a
+  6-phase 9-12 month timeline. Written around **NVIDIA Isaac Lab**.
+- **`saferl_debris_capture/`** -- 540KB, 26 tracked files, an 18-module
+  Python package scaffold: `envs/` (Isaac Lab env, 36-D obs / 6-D action,
+  Euler-equation tumbling dynamics, reward shaping), `shield/` (a **PRISM**
+  DTMC model plus abstraction/query/wrapper), `agents/` (PPO, SAC,
+  shielded), `training/`, `evaluation/`, `tests/`, and a `docs/paper_draft.md`.
+  `__pycache__` excluded by the existing root `.gitignore`.
+
+Flagging without acting on it: both describe a **different simulation stack
+(Isaac Lab + PRISM) than the UE + PyBullet line this repo has followed**,
+and that `shield/` scaffold is a real probabilistic shield, which is what
+phases 3/5 of the current track were meant to build. That is a direction
+question for you, not something this phase resolved.
+
+### Open questions / deferred decisions
+
+1. **UE tick-rate recommendation** -- 119 steps/sec confirms PyBullet-for-
+   training / UE-for-rendering, but the ceiling may be soft (see caveats
+   above). Confirm, or tell me to chase a higher number.
+2. **Two parallel project definitions** -- the newly landed Isaac Lab +
+   PRISM plan versus this repo's UE + PyBullet track. Which is the real
+   roadmap? This affects everything from phase 4 onward.
+3. **The shield is still the phase-1 placeholder** (random action near a
+   hazard). Untouched this phase, as scoped.
+4. Most episodes still end by truncation rather than by reaching the goal
+   (`ep_len_mean` ~900 of 1000). Fine for now; revisit with the real shield.
+
+### What Phase 4 (dynamic debris field) should assume
+
+- Episodes genuinely terminate. `done` fires on goal and on collision,
+  `truncated` fires at `max_episode_steps`, and there are tests holding
+  each of those in place.
+- The env is frictionless with a 10-substep control step. Any new dynamics
+  work should keep thrust meaningful relative to mass -- the friction-lock
+  failure mode is easy to reintroduce and silent when it happens.
+- A live UE PIE session is a solved, repeatable path (`SAFERL_RUN_PIE=1`,
+  `-nosound`, arm from `init_unreal.py`, never `-ExecutePythonScript`), at
+  ~119 steps/sec, driving actors kinematically from Python.
+- Training still runs in PyBullet. Do not move training into UE on the
+  strength of this phase alone -- open question 1.
+- The debris field is static in both backends. The UE scene uses five
+  hardcoded debris positions in `pie_session.py`; the PyBullet env still
+  randomizes hazard positions per episode with curriculum scaling.
