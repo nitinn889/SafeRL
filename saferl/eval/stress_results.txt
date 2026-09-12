@@ -1,0 +1,31 @@
+scenario               arm                     coll  ivc    ivs    fb  toward  unsafe   minD
+--------------------------------------------------------------------------------------------
+closing_head_on        no_shield               25/25    0    0.0   0.0     0.0     0.0   1.14
+closing_head_on        old_random              25/25   24    6.0   0.0     2.7     0.0   1.17
+closing_head_on        new_least_restrictive    0/25    0   23.0   0.0     0.0     0.0   2.21
+
+crossing_from_right    no_shield               25/25    0    0.0   0.0     0.0     0.0   1.29
+crossing_from_right    old_random              25/25   25    8.0   0.0     4.3     0.0   1.22
+crossing_from_right    new_least_restrictive    0/25    0   29.0   0.0     0.0     0.0   2.24
+
+crossing_from_left     no_shield               25/25    0    0.0   0.0     0.0     0.0   1.29
+crossing_from_left     old_random              25/25   25    8.0   0.0     4.2     0.0   1.22
+crossing_from_left     new_least_restrictive    0/25    0   29.0   0.0     0.0     0.0   2.24
+
+parked_obstacle        no_shield               25/25    0    0.0   0.0     0.0     0.0   1.27
+parked_obstacle        old_random              25/25   25    8.0   0.0     3.9     0.0   1.21
+parked_obstacle        new_least_restrictive    0/25    0   20.0   0.0     0.0     0.0   2.28
+
+surrounded             no_shield               25/25    0    0.0   0.0     0.0     0.0   1.26
+surrounded             old_random               3/25    3   59.0   0.0    29.1     0.0   1.60
+surrounded             new_least_restrictive    0/25    0   60.0  60.0    30.0     0.0   2.01
+
+pincer                 no_shield               25/25    0    0.0   0.0     0.0     0.0   1.19
+pincer                 old_random              25/25   25    7.0   0.0     3.8     0.0   1.23
+pincer                 new_least_restrictive    0/25    0   31.0   0.0    18.0     0.0   2.25
+
+coll=collisions/trials  ivc=collisions implicated by an intervention
+ivs=mean interventions  fb=mean fallback (boxed-in) interventions
+toward=mean interventions that thrust toward the triggering hazard
+unsafe=mean interventions the auditor rates unsafe when a safe action existed
+minD=mean closest approach to any hazard over the episode
