@@ -1,11 +1,21 @@
 {
-  "purpose": "Reference point for reading the in-training convergence probes.",
-  "note": "Probes call evaluate_model(), which shares the protocol's episode loop but does not load the model inside the seeded region, so its numbers are NOT bit-comparable with evaluate(). This records what the same probe path reports for the *starting* checkpoint, so probe values during the run can be read against a like-for-like reference instead of against the authoritative figure.",
+  "purpose": "Reference points for reading the in-training convergence probes.",
+  "why_this_file_exists": "Probes call evaluate_model(), which shares the protocol's episode loop but does not load the model inside the seeded region, so its numbers are NOT bit-comparable with evaluate(). A probe value during the run is therefore meaningless against the authoritative 89.2% figure. What it can be read against is what the SAME probe path reports for the STARTING checkpoint, at the SAME seed. That is what this file records.",
   "checkpoint": "saferl/eval/phase7/saferl_phase7.zip",
   "checkpoint_md5": "ed1449c76eaf6c40e390ffb6dc8d0c08",
-  "probe_protocol": {"n_episodes": 100, "seed": 42, "deterministic": true},
-  "probe_goal_rate": 0.820,
-  "probe_intervention_rate": 0.0919,
+  "probe_protocol": {"n_episodes": 100, "deterministic": true},
+  "baselines_by_seed": {
+    "7": {
+      "goal_rate": 0.790,
+      "intervention_rate": 0.0641,
+      "note": "Seed 7 is the probe/selection seed used by train_phase9.py. THIS is the like-for-like reference for reading run probes."
+    },
+    "42": {
+      "goal_rate": 0.820,
+      "intervention_rate": 0.0919,
+      "note": "Seed 42 is reserved for the final authoritative eval and is NOT used for probes, to keep checkpoint selection off the reported episodes. Recorded here only to show the seed-to-seed spread at n=100, which is itself worth knowing: 3pp of goal rate and 2.8pp of intervention rate between two seeds on identical weights."
+    }
+  },
   "authoritative_for_same_checkpoint": {
     "source": "saferl/eval/phase8_reconciliation/phase7/eval_summary.csv",
     "n_episodes": 500, "seed": 42, "deterministic": true,
