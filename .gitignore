@@ -5,3 +5,8 @@ __pycache__/
 saferl_model.zip
 saferl_metrics.png
 *.log
+train_log.txt
+saferl/eval/*/tb/
+saferl/eval/*/run_events/
+saferl/eval/*/checkpoint_load_verification/
+saferl/eval/*/run*_oscillation_evidence/
