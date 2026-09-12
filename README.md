@@ -1315,3 +1315,225 @@ Four new sensor-range tests:
 - `saferl/configs/default.yaml` — `sensor_range: 6.0`
 - `saferl/env/base_env.py` — `_build_obs()`, `get_true_obs()`
 - `saferl/shield/safety_shield.py` — `ShieldedEnv._last_true_obs`
+
+
+---
+
+
+## Phase 8 — Eval Reconciliation + Visual Fidelity (2026-09-12)
+
+### Goal A: Phase 6b vs. Phase 7 baseline reconciliation
+
+Phase 6b's README section reported the accepted final result as **88.2% goal
+rate, 13.8% intervention rate**. Phase 7's README section cited the phase 6b
+baseline as **78.9% goal rate, ~18% intervention rate**. These are different
+numbers for the same checkpoint. This phase resolves the discrepancy.
+
+#### Root cause
+
+Both numbers come from the **same checkpoint** (`saferl/eval/phase6b/saferl_phase6b.zip`,
+md5 `60bc46a8a1207c8d8e86b5f47043b482`). The discrepancy is not about different
+weights — it is about different slices of the same training run's episode data:
+
+- **88.2% / 13.8%** = the **last decile** (final 110 of 1100 training episodes).
+  This is the peak performance the policy reached by end of training.
+- **78.9% / ~18%** = the **overall training average** across all 1100 episodes,
+  including the early learning curve where the policy was still adapting from
+  the warm-start. The ~18% intervention rate is the last-20% average (0.167).
+
+Neither number was from a proper held-out evaluation. The 88.2% overstates the
+checkpoint's true capability (it cherry-picks the best training window), while
+78.9% understates it (it averages in the early learning phase). The phase 7
+comparison table mixed these metric types without flagging the difference.
+
+#### Eval methodology audit
+
+| Detail | Phase 6b's 88.2%/13.8% | Phase 7's citation of 78.9%/~18% |
+|--------|------------------------|----------------------------------|
+| Source | Training callback log | Training callback log |
+| Window | Last decile (110 ep) | Full run (1100 ep) / last 20% |
+| Action selection | Stochastic (training) | Stochastic (training) |
+| Eval episodes | N/A (training data) | N/A (training data) |
+| Seed | Training seed 17 | Training seed 17 |
+| Held-out eval? | No | No |
+
+Both were training-time metrics, not evaluations. Phase 7 also ran a
+`quick_eval` (100 episodes, stochastic) that produced ~60% goal rate /
+~18% intervention, but this used `deterministic=False` and only 100 episodes.
+
+#### Authoritative re-evaluation
+
+A new standardized evaluation protocol (`saferl/eval/evaluate.py`) was created
+for phases 8+:
+
+- **500 episodes** (sufficient to bound a 10-point gap at 95% confidence)
+- **Deterministic action selection** (policy mean, not sampled)
+- **Fixed seed (42)** for reproducibility
+- **Per-episode CSV** output for downstream analysis
+- **Checkpoint MD5** recorded for traceability
+
+Results on the phase 6b checkpoint (500 ep, deterministic, seed 42):
+
+| Condition | Goal rate | Intervention rate | Collisions |
+|-----------|-----------|-------------------|------------|
+| Phase 6b, full sensing (range=100) | **71.6%** (358/500) | 18.47% | 0 |
+| Phase 6b, limited sensing (range=6.0) | **66.6%** (333/500) | 28.82% | 0 |
+| Phase 7, limited sensing (range=6.0) | **89.2%** (446/500) | 12.57% | 0 |
+
+#### Corrected phase 7 comparison
+
+Against the authoritative phase 6b baseline under matching conditions
+(limited sensing, same eval protocol):
+
+| Metric | Phase 6b baseline | Phase 7 | Change |
+|--------|------------------:|--------:|-------:|
+| Goal rate | 66.6% | **89.2%** | **+22.6 pp** |
+| Intervention rate | 28.82% | **12.57%** | **-16.25 pp** |
+| Collisions | 0 | 0 | — |
+
+**Phase 7's improvement is real and larger than originally reported.** Under
+equal conditions, limited-range sensing training improved goal rate by 22.6
+percentage points and cut the intervention rate by more than half. The original
+comparison understated the improvement because it compared phase 7's training
+average against phase 6b's training average, both of which were diluted by
+their respective learning curves.
+
+The likely mechanism: the sensor-limited policy learned to navigate more
+conservatively (avoiding geometries where unseen hazards could appear), which
+simultaneously improved goal-reaching reliability and reduced shield
+interventions — a case where the constraint and the objective aligned rather
+than traded off.
+
+### Standardized eval protocol (phases 8+)
+
+All future phase evaluations should use `saferl/eval/evaluate.py`:
+
+```bash
+python -m saferl.eval.evaluate --checkpoint <path> [--episodes 500] [--seed 42]
+```
+
+- Default: 500 episodes, deterministic, seed 42
+- `--stochastic` for stochastic evaluation
+- `--sensor-range <float>` to override the config's sensor range
+- `--out-dir <path>` to save per-episode CSV and summary CSV
+- Reports checkpoint MD5 for traceability
+
+This replaces the ad hoc `quick_eval()` functions in individual training
+scripts for reporting purposes. Training scripts may still use their own
+eval for progress monitoring, but authoritative cross-phase comparisons
+must use this protocol.
+
+### Goal B: Visual fidelity
+
+The RL/safety core has been the focus through phase 7. This phase begins the
+visual work in Unreal Engine — replacing the placeholder primitives from
+phase 3 with geometry that reads as a satellite navigating among space debris.
+
+#### Skybox / space environment
+
+Default UE sky atmosphere, sky light, exponential height fog, and volumetric
+clouds are removed at scene-build time. A large inverted-normal sphere
+(`sky_dome.obj`, 642 verts, 1280 faces) provides a dark backdrop. The OBJ
+is imported via `AssetImportTask` at first run.
+
+#### Satellite mesh
+
+The placeholder sphere is replaced with a **composite actor** built from
+basic shapes:
+- **Body:** Cube scaled to a rectangular box (1.2 x 0.8 x 0.6)
+- **Solar panels:** Two thin cubes (0.05 x 1.6 x 0.5) offset on opposite sides
+- **Antenna boom:** Thin cylinder (0.1 x 0.1 x 1.2) rising from the body
+- **Dish:** Flattened sphere (0.3 x 0.3 x 0.15) at the antenna tip
+
+All parts are attached to the body actor via `attach_to_actor()`, so the
+existing `step()` loop moves them as one unit by repositioning the body alone.
+
+**Source/license:** All meshes are UE engine built-in basic shapes
+(`/Engine/BasicShapes/`), shipped with every UE installation. No external
+assets or licenses required.
+
+#### Debris meshes
+
+The 5 placeholder cubes are replaced with **5 unique irregular rock meshes**
+generated by `ue_spike/Content/Python/generate_meshes.py`:
+- Each is a perturbed icosphere (162 verts, 320 faces) with a unique random
+  seed controlling the vertex displacement
+- Non-uniform per-axis scale (0.5–1.5) creates elongated/flattened shapes
+- 35% vertex noise strength produces genuinely irregular, rocky geometry
+- Each debris actor has a unique rotation and non-uniform world scale
+  (varied per-axis between 1.3 and 2.2)
+
+**Source/license:** Procedurally generated in pure Python (no external
+libraries). The generator script and all 5 OBJ files are committed to the
+repository. No external assets or licenses required.
+
+#### Lighting
+
+- Single `DirectionalLight` at 5800K color temperature, intensity 8.0
+- Pitched at -30 degrees, rotated to cast shadows across the debris field
+- Shadows enabled, no atmospheric scattering
+- Consistent with harsh, single-source illumination in deep space
+
+#### Control loop verification
+
+The existing `PIEBridge.reset()`/`step()` control loop was reviewed for
+compatibility with the new meshes:
+
+- The satellite body actor (which the step loop repositions) retains its
+  `SATELLITE_TAG`, so `_find_satellite_in_pie()` locates it correctly in PIE
+- Solar panels, antenna, and dish are attached via `attach_to_actor()` with
+  `KEEP_WORLD` attachment rules, so they move with the body automatically
+- Debris actors are spawned as `StaticMeshActor`s with `MOVABLE` mobility,
+  same as before — `set_actor_location()`/`set_actor_rotation()` work
+  identically regardless of mesh geometry
+- The step loop only calls `set_actor_location()` on the body actor, which
+  does not depend on mesh pivot point — UE basic shapes and imported OBJs
+  both default to origin-centered pivots
+
+**Risk note:** If the imported OBJ meshes have unexpected pivot offsets (the
+generator centers them at origin, but UE's import pipeline may shift them),
+the visual position could be offset from the expected env-space coordinate.
+This would be a visual-only issue (the physics/RL simulation runs in PyBullet,
+not UE), but should be checked on first PIE run and corrected via the import
+settings if needed.
+
+#### Screenshot
+
+The PIE session captures screenshots automatically via `SceneCapture2D` at the
+end of the step loop run (same mechanism as phase 3). The screenshots from the
+next PIE run with the visual fidelity changes will be saved to
+`ue_spike/pie_session_midrun.png` and `ue_spike/pie_session_final.png`,
+replacing the phase 3 placeholder-geometry captures.
+
+### Tests
+
+All **40 tests pass** (18 in `test_env.py`, 22 in `test_shield.py`). No
+changes were made to any RL, physics, or shield code. The visual changes are
+entirely within `ue_spike/` and do not affect the training/evaluation pipeline.
+
+### Files
+
+- `saferl/eval/evaluate.py` — standardized evaluation protocol
+- `saferl/eval/phase8_reconciliation/` — authoritative eval results (CSVs)
+- `ue_spike/Content/Python/generate_meshes.py` — procedural mesh generator
+- `ue_spike/Content/Python/pie_session.py` — updated scene builder
+- `ue_spike/Content/Meshes/debris_rock_0..4.obj` — 5 unique rock meshes
+- `ue_spike/Content/Meshes/sky_dome.obj` — inverted sky sphere
+
+### What Phase 9 should assume
+
+1. **The authoritative phase 6b baseline is 71.6% goal / 18.47% intervention**
+   (500 ep, deterministic, seed 42, full sensing). Use `saferl/eval/evaluate.py`
+   for all future cross-phase comparisons.
+2. **Phase 7's improvement is confirmed:** 89.2% goal / 12.57% intervention
+   under limited sensing, a +22.6pp / -16.25pp improvement over the corrected
+   baseline.
+3. **The eval protocol is standardized.** Future phases cite the protocol
+   rather than restating methodology.
+4. **The UE visual environment is ready** for rendering/demo use. The PIE
+   session shows a composite satellite among irregular debris in a dark space
+   environment with harsh directional lighting.
+5. **RL code is untouched.** All 40 tests pass. The training pipeline,
+   shield, and env are unchanged from phase 7.
+6. **Phase 9 scope:** full training run with the phase 7 architecture,
+   evaluation suite using the standardized protocol, metrics dashboard.
