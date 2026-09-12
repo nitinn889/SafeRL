@@ -1081,3 +1081,149 @@ magnitude, margin tolerance, and goal-termination priority.
    code should use it rather than positional arguments.
 5. **The OOB penalty is load-bearing** — without it, neither arm learns
    anything useful. It must be preserved in all future configs.
+
+---
+
+## Phase 6b (2026-09-12): Fix constrained PPO collapse (redo of Goal B)
+
+Phase 6's constrained arm collapsed to 0% goal rate because a single critic
+conflated task reward and cost penalty — the policy satisfied the intervention
+constraint by freezing rather than navigating. This phase fixes the
+architecture with three complementary measures: a separate cost-value head,
+a curriculum on the constraint target, and warm-starting from the working
+unconstrained policy. Named "6b" rather than "7" because this resolves an
+open problem from phase 6, not new scope.
+
+### The two-critic architecture
+
+SB3's `ActorCriticPolicy` was subclassed as `DualCriticPolicy` with a second
+value head (`cost_value_net`), a `Linear(64, 1)` sharing the same critic
+feature extractor as the task-value head but with independent weights. SB3
+does not have first-party support for two-critic constrained PPO, so this
+required three custom classes:
+
+- **`DualCriticPolicy`**: adds `cost_value_net` alongside the standard
+  `value_net`. `forward_all(obs, actions)` returns `(values, cost_values,
+  log_prob, entropy)` in one forward pass. The actor network is unmodified.
+- **`CostRolloutBuffer`**: extends `RolloutBuffer` with parallel cost arrays
+  (`cost_rewards`, `cost_values`, `cost_returns`, `cost_advantages`). Computes
+  cost-specific GAE alongside standard task GAE. Combined advantages
+  `A_task - λ·A_cost` are set before the training loop.
+- **`ConstrainedPPO`**: subclasses `PPO` to override `collect_rollouts()`
+  (collects cost signals and predicts cost values) and `train()` (adds cost
+  value loss and uses combined advantages for the clipped surrogate).
+
+The Lagrange multiplier update uses the same dual-gradient formula as phase 6
+(`λ ← clip(λ + lr·(ema_rate − target), 0, max)`) but now drives the policy
+gradient through cost advantages rather than reward shaping. This is the
+architectural fix: the task critic sees only task reward, the cost critic sees
+only intervention cost, and the policy gradient balances both instead of one
+critic trying to regress both signals.
+
+### Curriculum on the constraint target
+
+The constraint target ramps linearly over training:
+
+| training progress | target rate | rationale |
+|---|---|---|
+| 0% (start) | **0.25** | Above the unconstrained policy's ~0.19 natural rate |
+| 50% | 0.15 | Gradually tightening |
+| 100% (end) | **0.05** | Phase 6's final target (retained) |
+
+This prevents the cold-start collapse: early in training, the constraint is
+non-binding (target > natural rate), so the policy preserves its navigation
+skill. As the target tightens, the policy adapts to reduce interventions while
+maintaining task performance. The schedule is tied to `_current_progress_remaining`
+(same mechanism SB3 uses for learning rate schedules), consistent with phase 4's
+debris-speed curriculum pattern.
+
+### Warm-start verification
+
+The unconstrained policy's 400k-step checkpoint (`saferl_unconstrained.zip`)
+was loaded into `DualCriticPolicy`. 12 of 14 parameters matched exactly
+(all actor and task-critic weights); the 2 new `cost_value_net` parameters
+were randomly initialized.
+
+**Verification**: action distributions were compared between the original PPO
+model and the warm-started `DualCriticPolicy` on identical observations —
+probabilities matched to floating-point precision (`[0.9952, 0.000006,
+0.000346, 0.00448]`). The warm-started model evaluated at **~60% goal rate**
+on 300 fresh episodes (stochastic policy), consistent with the original
+model's overall training rate of 66.3% (the 95.6% reported in phase 6 was
+the last-decile in-distribution metric, not a generalization number).
+
+### Training results (400k steps)
+
+| decile | timestep | goal % | iv rate | task reward | lambda | target |
+|---|---|---|---|---|---|---|
+| D1 | 53k | 26 | 0.198 | -60.1 | 0.000 | 0.224 |
+| D2 | 115k | 85 | 0.155 | +40.3 | 0.000 | 0.193 |
+| D3 | 147k | 81 | 0.173 | +35.4 | 0.000 | 0.177 |
+| D4 | 175k | 76 | 0.179 | +27.5 | 0.003 | 0.163 |
+| D5 | 209k | 84 | 0.186 | +37.5 | 0.039 | 0.146 |
+| D6 | 243k | 82 | 0.164 | +35.8 | 0.118 | 0.129 |
+| D7 | 276k | 89 | 0.181 | +52.0 | 0.193 | 0.113 |
+| D8 | 312k | 89 | 0.192 | +50.8 | 0.328 | 0.094 |
+| D9 | 348k | 88 | 0.196 | +49.4 | 0.506 | 0.076 |
+| D10 | 385k | **88** | **0.138** | **+48.5** | 0.700 | 0.058 |
+
+1100 episodes total. 868 goals (78.9%). **Zero collisions.**
+
+**Final-decile comparison across all three runs:**
+
+| metric | unconstrained (ph6) | constrained (ph6) | phase 6b |
+|---|---|---|---|
+| goal rate % | 95.6 | 0.0 | **88.2** |
+| intervention rate | 0.194 | 0.015 | **0.138** |
+| task reward | +61.8 | -100.9 | **+48.5** |
+| lambda | 0.0 | 0.0 | 0.700 |
+| collisions | 0 | 0 | 0 |
+
+### Assessment: partially resolved
+
+**What worked.** The two-critic architecture definitively prevents the phase-6
+collapse. The policy maintained 88% goal rate under active constraint pressure
+(lambda=0.700 and rising), compared to 0% in phase 6's single-critic
+constrained arm. The cost critic's loss decreased from ~8 to ~4 over training,
+confirming it learned the cost signal. The warm-start and curriculum both
+functioned as intended — the policy never fell into the freezing attractor.
+
+**What remains.** The intervention rate decreased 29% from the unconstrained
+baseline (0.138 vs 0.194) but did not reach the 5% target. Lambda was still
+rising at the end of training, indicating the dual-gradient ascent hasn't
+converged. The policy found a regime where it navigates well (88% goals) with
+moderate cost (~14% of steps trigger the shield) while lambda applies growing
+pressure — but 400k steps wasn't enough for that pressure to substantially
+change the navigation strategy.
+
+This is an honest tradeoff, not a failure mode: the policy IS navigating and
+IS under constraint pressure and IS reducing interventions. It just hasn't
+reduced them *enough*. In phase 6's collapsed run, the policy trivially
+satisfied the constraint by not navigating — that pathology is gone.
+
+### Test suite
+
+All 36 tests pass (18 in `test_env.py`, 18 in `test_shield.py`). No changes
+were made to `env/base_env.py` or `shield/safety_shield.py`.
+
+### What Phase 7 should assume
+
+1. **The hard shield still works.** 0/150 collisions (stress test), 0 training
+   collisions across 1100 episodes. The shield config (`force_mag=48`,
+   `lookahead_steps=20`, `safe_dist=2.2`) is unchanged from phase 6.
+2. **The two-critic constrained PPO is the correct architecture.** Use
+   `ConstrainedPPO` + `DualCriticPolicy` from `dual_critic.py`. The old
+   single-critic `CostPenaltyWrapper` in `constrained.py` is retained for
+   reference but should not be used for new training.
+3. **The unconstrained policy (~60% eval goal rate) is the warm-start source.**
+   `saferl/eval/phase6/saferl_unconstrained.zip` weights load cleanly into
+   `DualCriticPolicy` — 12/14 params, cost head initialised fresh.
+4. **To push the intervention rate lower**, the most promising levers are:
+   - Longer training (lambda was still rising at 400k)
+   - Lower curriculum start (tighter constraint earlier, once warm-start
+     policy is stable)
+   - Reward shaping for near-miss avoidance (still the most-deferred open
+     question — the policy gets no credit for cleanly dodging a hazard)
+   - Warm-starting from phase 6b's checkpoint (which already has some
+     constraint adaptation) rather than from the unconstrained one
+5. **CPU remains faster than GPU** for this network size and env count.

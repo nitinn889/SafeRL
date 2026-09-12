@@ -1,0 +1,2 @@
+arm,episodes,first_rate,last_rate,first_task_reward,last_task_reward,first_ivs_per_ep,last_ivs_per_ep,first_steps,last_steps,goals,collisions,final_lambda,goal_rate_pct
+phase6b,1100,0.1761325,0.16701095454545453,-9.89909090909091,48.96045454545454,113.07272727272728,69.6590909090909,598.9909090909091,328.5772727272727,868,0,0.7747,78.9
