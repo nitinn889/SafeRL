@@ -316,6 +316,7 @@ def test_shielded_env_counts_fallbacks_separately():
                                     float(agent[1] + d[1] * 2.0), HAZARD_Z]
         base.hazard_velocities[i] = [0.0, 0.0, 0.0]
     shielded._last_obs = base._get_obs()
+    shielded._last_true_obs = base.get_true_obs()
 
     shielded.step(3)
     assert shielded.interventions == 1
@@ -325,7 +326,116 @@ def test_shielded_env_counts_fallbacks_separately():
     for i in range(len(base.hazard_positions)):
         base.hazard_positions[i] = [50.0, 50.0, HAZARD_Z]
     shielded._last_obs = base._get_obs()
+    shielded._last_true_obs = base.get_true_obs()
     shielded.step(3)
     assert shielded.interventions == 1
     assert shielded.fallback_interventions == 1
+    shielded.close()
+
+
+# ── phase 7: sensor-range tests ───────────────────────────────────────────
+
+
+def test_out_of_range_hazard_zeroed_in_obs():
+    """Hazards beyond sensor_range appear as zeros in the policy's obs."""
+    env = SafeNav3DEnv(size=10, max_hazards=2, curriculum=False,
+                       render_mode="direct", sensor_range=3.0)
+    env.reset()
+    agent_pos = np.array(env.hazard_positions[0]) + [5.0, 0.0, 0.0]
+    import pybullet as p
+    p.resetBasePositionAndOrientation(
+        env.agent_id, agent_pos.tolist(), [0, 0, 0, 1],
+        physicsClientId=env._client)
+    env.hazard_positions[0] = [agent_pos[0] - 5.0, agent_pos[1], 0.5]
+    env.hazard_velocities[0] = [1.0, 0.0, 0.0]
+    env.hazard_positions[1] = [agent_pos[0] + 1.0, agent_pos[1], 0.5]
+    env.hazard_velocities[1] = [0.0, 1.0, 0.0]
+
+    obs = env._get_obs()
+    h0_block = obs[OBS_HEADER_LEN:OBS_HEADER_LEN + OBS_PER_HAZARD]
+    h1_block = obs[OBS_HEADER_LEN + OBS_PER_HAZARD:OBS_HEADER_LEN + 2 * OBS_PER_HAZARD]
+    assert np.allclose(h0_block, 0.0), "out-of-range hazard should be zeroed"
+    assert not np.allclose(h1_block, 0.0), "in-range hazard should be visible"
+    env.close()
+
+
+def test_in_range_hazard_appears_in_obs():
+    """Hazards within sensor_range appear with real data."""
+    env = SafeNav3DEnv(size=10, max_hazards=1, curriculum=False,
+                       render_mode="direct", sensor_range=5.0)
+    env.reset()
+    import pybullet as p
+    p.resetBasePositionAndOrientation(
+        env.agent_id, [3.0, 3.0, 0.5], [0, 0, 0, 1],
+        physicsClientId=env._client)
+    env.hazard_positions[0] = [5.0, 3.0, 0.5]
+    env.hazard_velocities[0] = [-1.0, 0.0, 0.0]
+
+    obs = env._get_obs()
+    h_block = obs[OBS_HEADER_LEN:OBS_HEADER_LEN + OBS_PER_HAZARD]
+    assert abs(h_block[0] - 5.0) < 0.1, "in-range hazard x should be ~5.0"
+    assert abs(h_block[3] - (-1.0)) < 0.1, "in-range hazard vx should be ~-1.0"
+    env.close()
+
+
+def test_true_obs_shows_all_hazards_regardless_of_range():
+    """get_true_obs() is not affected by sensor_range."""
+    env = SafeNav3DEnv(size=10, max_hazards=1, curriculum=False,
+                       render_mode="direct", sensor_range=2.0)
+    env.reset()
+    import pybullet as p
+    p.resetBasePositionAndOrientation(
+        env.agent_id, [1.0, 1.0, 0.5], [0, 0, 0, 1],
+        physicsClientId=env._client)
+    env.hazard_positions[0] = [8.0, 8.0, 0.5]
+    env.hazard_velocities[0] = [-0.5, -0.5, 0.0]
+
+    sensed = env._get_obs()
+    true = env.get_true_obs()
+    h_sensed = sensed[OBS_HEADER_LEN:OBS_HEADER_LEN + OBS_PER_HAZARD]
+    h_true = true[OBS_HEADER_LEN:OBS_HEADER_LEN + OBS_PER_HAZARD]
+    assert np.allclose(h_sensed, 0.0), "sensed should be zeroed (out of range)"
+    assert abs(h_true[0] - 8.0) < 0.1, "true obs should show real position"
+    env.close()
+
+
+def test_shield_intervenes_on_out_of_sensor_range_hazard():
+    """The shield uses true state and intervenes on a hazard the policy
+    cannot see. This is the core proof that the privileged-shield design
+    holds in code, not just in the README."""
+    env = SafeNav3DEnv(size=10, max_hazards=1, curriculum=False,
+                       render_mode="direct", sensor_range=3.0)
+    shield = SafetyShield.from_config(CFG)
+    shielded = ShieldedEnv(env, shield)
+    shielded.reset()
+
+    import pybullet as p
+    agent_start = [5.0, 5.0, 0.5]
+    p.resetBasePositionAndOrientation(
+        env.agent_id, agent_start, [0, 0, 0, 1],
+        physicsClientId=env._client)
+    # Place hazard at distance 4.5 (> sensor_range 3.0) but closing fast
+    env.hazard_positions[0] = [5.0, 0.5, 0.5]
+    env.hazard_velocities[0] = [0.0, 2.0, 0.0]
+
+    # Rebuild both obs types after manual placement
+    shielded._last_obs = env._get_obs()
+    shielded._last_true_obs = env.get_true_obs()
+
+    # Confirm the policy CANNOT see the hazard
+    h_block = shielded._last_obs[OBS_HEADER_LEN:OBS_HEADER_LEN + OBS_PER_HAZARD]
+    assert np.allclose(h_block, 0.0), (
+        "policy obs should not show the out-of-range hazard")
+
+    # Confirm the shield CAN see it
+    h_true = shielded._last_true_obs[OBS_HEADER_LEN:OBS_HEADER_LEN + OBS_PER_HAZARD]
+    assert not np.allclose(h_true, 0.0), (
+        "shield's true obs must show the hazard")
+
+    # The hazard is heading toward the agent: action 1 (-Y) moves TOWARD it.
+    # The shield should intervene.
+    _, _, _, _, info = shielded.step(1)
+    assert shielded.interventions >= 1, (
+        "shield must intervene on a closing hazard it can see via true obs, "
+        "even though the policy's obs shows zeros for that hazard")
     shielded.close()

@@ -42,7 +42,7 @@ class SafeNav3DEnv(gym.Env):
                  sim_substeps=10, agent_friction=0.0, max_episode_steps=1000,
                  debris_min_speed=0.3, debris_max_speed=1.2,
                  debris_speed_ramp_episodes=200, bounds_margin=5.0,
-                 out_of_bounds_penalty=-100.0):
+                 out_of_bounds_penalty=-100.0, sensor_range=None):
         super().__init__()
         self.size = size
         self.max_hazards = max_hazards
@@ -59,6 +59,7 @@ class SafeNav3DEnv(gym.Env):
         self.debris_min_speed = debris_min_speed
         self.debris_max_speed = debris_max_speed
         self.debris_speed_ramp_episodes = debris_speed_ramp_episodes
+        self.sensor_range = sensor_range
         self.episode_count = 0
         self._step_count = 0
         self._client = -1  # PyBullet client ID (set on first reset)
@@ -202,20 +203,36 @@ class SafeNav3DEnv(gym.Env):
                 self._hazard_ids[i], pos, [0, 0, 0, 1], physicsClientId=cid
             )
 
-    def _get_obs(self):
+    def _build_obs(self, sensor_limited=True):
         cid = self._client
         pos, _ = p.getBasePositionAndOrientation(self.agent_id,
                                                   physicsClientId=cid)
         vel, _ = p.getBaseVelocity(self.agent_id, physicsClientId=cid)
+        agent_pos = np.array(pos)
         obs = list(pos) + list(vel) + list(self.goal_pos)
         for h_pos, h_vel in zip(self.hazard_positions, self.hazard_velocities):
-            obs.extend(h_pos)
-            obs.extend(h_vel)   # the policy needs motion, not just proximity
+            if (sensor_limited and self.sensor_range is not None
+                    and np.linalg.norm(np.array(h_pos) - agent_pos) > self.sensor_range):
+                obs.extend([0.0] * OBS_PER_HAZARD)
+            else:
+                obs.extend(h_pos)
+                obs.extend(h_vel)
         target_len = self.observation_space.shape[0]
-        # Pad with zeros if fewer hazards (curriculum) or slice to cap length
         while len(obs) < target_len:
             obs.extend([0.0] * OBS_PER_HAZARD)
         return np.array(obs[:target_len], dtype=np.float32)
+
+    def _get_obs(self):
+        return self._build_obs(sensor_limited=True)
+
+    def get_true_obs(self):
+        """Full observation with all hazards regardless of sensor range.
+
+        Used by the safety shield, which has privileged access to true
+        hazard state — it is a dedicated safety system, not limited by
+        the policy's sensor model (see phase 7 design decision).
+        """
+        return self._build_obs(sensor_limited=False)
 
     def _out_of_bounds(self, pos):
         """Has the agent drifted out of the play area by more than the margin?"""

@@ -43,6 +43,12 @@ env:
   # with curriculum on, the upper speed bound ramps from min to max over this
   # many episodes, so early training sees near-static debris
   debris_speed_ramp_episodes: 200
+  # Maximum distance at which the policy can detect a hazard. Hazards beyond
+  # this range appear as zeros in the observation (same convention as unused
+  # hazard slots under curriculum). The safety shield is NOT limited by this
+  # -- it always sees true hazard state regardless of range (see phase 7).
+  # null = unlimited (god's-eye view, the pre-phase-7 default).
+  sensor_range: 6.0
 
 shield:
   safe_dist: 2.2

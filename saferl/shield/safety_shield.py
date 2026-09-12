@@ -332,15 +332,27 @@ class ShieldedEnv(gym.Wrapper):
         self.shield = shield
         self.interventions = 0
         self.fallback_interventions = 0
-        self._last_obs = None  # obs tracked here, not via a private env method
+        self._last_obs = None       # sensed obs (sensor-limited), returned to policy
+        self._last_true_obs = None   # true obs (all hazards), used by shield only
+
+    def _true_obs(self):
+        """Get the true (privileged) observation from the base env."""
+        base = self.env
+        while hasattr(base, "env"):
+            base = base.env
+        if hasattr(base, "get_true_obs"):
+            return base.get_true_obs()
+        return self._last_obs
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
         self._last_obs = obs
+        self._last_true_obs = self._true_obs()
         return obs, info
 
     def step(self, action):
-        safe_action, intervened = self.shield.check_and_fix(self._last_obs, action)
+        safe_action, intervened = self.shield.check_and_fix(
+            self._last_true_obs, action)
         decision = getattr(self.shield, "last_decision", None)
         if intervened:
             self.interventions += 1
@@ -348,6 +360,7 @@ class ShieldedEnv(gym.Wrapper):
                 self.fallback_interventions += 1
         obs, reward, done, truncated, info = self.env.step(safe_action)
         self._last_obs = obs
+        self._last_true_obs = self._true_obs()
         # Cost signal for the constrained-PPO layer, distinct from the env's
         # own collision `cost`: this one fires whenever the shield had to step
         # in at all, which is the thing the policy should learn to stop
