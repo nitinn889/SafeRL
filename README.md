@@ -1227,3 +1227,91 @@ were made to `env/base_env.py` or `shield/safety_shield.py`.
    - Warm-starting from phase 6b's checkpoint (which already has some
      constraint adaptation) rather than from the unconstrained one
 5. **CPU remains faster than GPU** for this network size and env count.
+
+
+---
+
+
+## Phase 7 — Limited-Range Sensing
+
+**Goal:** Make the policy's observation realistic — it should only see hazards
+within `sensor_range`, while the safety shield retains privileged access to
+all true hazard state.
+
+### Design decision
+
+The safety shield keeps its full, privileged view of true hazard state. It is
+*not* limited to the policy's sensor range. This is a deliberate choice: the
+shield models a dedicated collision-avoidance system (like TCAS in aviation)
+with its own sensor path, not a software layer that must share the main
+controller's perception. The policy sees what a limited sensor would see; the
+shield sees what a safety-critical backup system would see.
+
+### Implementation
+
+1. **Config** (`default.yaml`): `sensor_range: 6.0` — hazards beyond 6 units
+   from the agent appear as zeros in the policy's observation. `null` disables
+   the limit (god's-eye view, the pre-phase-7 default).
+
+2. **Observation split** (`base_env.py`): `_get_obs()` refactored into
+   `_build_obs(sensor_limited)`. `_get_obs()` calls it with `True` (policy
+   view); `get_true_obs()` calls it with `False` (shield view). The zero
+   padding uses the same convention as curriculum-unused hazard slots — no
+   observation-space change needed.
+
+3. **Privileged shield** (`safety_shield.py`): `ShieldedEnv` tracks
+   `_last_true_obs` alongside `_last_obs`. The shield receives true obs via
+   `check_and_fix(self._last_true_obs, action)`, while the policy receives
+   sensor-limited obs from `step()` and `reset()`.
+
+### Training results
+
+Fine-tuned from the phase 6b constrained checkpoint (200k steps, seed 17):
+
+| Metric | Phase 6b (baseline) | Phase 7 (limited sensing) |
+|--------|--------------------:|-------------------------:|
+| Goal rate (eval, 50 ep) | ~60% (stochastic) | **86.0%** |
+| Goal rate (training) | 78.9% | **83.8%** |
+| Intervention rate (eval) | ~18% | **7.46%** |
+| Intervention rate (last 20%) | 16.7% | **11.4%** |
+| Collisions | 0 | **0** |
+| Lambda (final) | 0.77 | **1.70** |
+| Episodes | 1100 | 579 |
+
+The policy adapted well to partial observability. The higher lambda (1.70
+vs 0.77) reflects the tighter constraint being enforced under harder conditions.
+
+**Key observation:** the privileged shield compensates for the policy's blind
+spots. When a hazard approaches from outside sensor range, the shield
+intervenes even though the policy has no information about that hazard. The
+policy then learns to spend less time in geometries where the shield must
+intervene — even though it cannot directly observe what triggers the shield.
+
+### Tests (40/40 passing)
+
+Four new sensor-range tests:
+- `test_out_of_range_hazard_zeroed_in_obs` — hazard beyond range → zeros
+- `test_in_range_hazard_appears_in_obs` — hazard within range → real data
+- `test_true_obs_shows_all_hazards_regardless_of_range` — get_true_obs() bypass
+- `test_shield_intervenes_on_out_of_sensor_range_hazard` — **the core proof**:
+  hazard outside sensor range on collision course, policy obs shows zeros, but
+  the shield sees it via true obs and intervenes
+
+### Stretch goals — deferred
+
+- **Sensor-range curriculum** (gradually shrinking range during training):
+  not implemented. The policy achieved 86% goal rate with a fixed 6.0 range
+  from the warm-start — no evidence a curriculum would help.
+
+- **Sensor noise** (Gaussian noise on in-range hazard observations):
+  deferred to a future phase. The core limited-sensing signal is clean; noise
+  adds realism but would obscure whether any degradation comes from range
+  limits or from noise.
+
+### Files
+
+- `saferl/training/train_phase7.py` — fine-tuning script
+- `saferl/eval/phase7/` — training CSV, plot, checkpoint, summary
+- `saferl/configs/default.yaml` — `sensor_range: 6.0`
+- `saferl/env/base_env.py` — `_build_obs()`, `get_true_obs()`
+- `saferl/shield/safety_shield.py` — `ShieldedEnv._last_true_obs`
