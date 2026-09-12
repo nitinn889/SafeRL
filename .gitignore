@@ -10,3 +10,12 @@ saferl/eval/*/tb/
 saferl/eval/*/run_events/
 saferl/eval/*/checkpoint_load_verification/
 saferl/eval/*/run*_oscillation_evidence/
+ue_spike/Content/Meshes/Rocks/
+ue_spike/Content/Meshes/Satellite/
+ue_spike/Content/Textures/
+ue_spike/Content/Meshes/*.uasset
+ue_spike/Saved/
+ue_spike/Intermediate/
+ue_spike/DerivedDataCache/
+ue_spike/phase8c_results.json
+ue_spike/pie_heartbeat.log
