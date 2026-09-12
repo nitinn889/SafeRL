@@ -17,6 +17,22 @@ OBS_PER_HAZARD = 6
 
 PHYSICS_HZ = 240.0  # PyBullet's default simulation rate
 
+# Discrete action -> unit thrust direction in the world frame. The shield has
+# to predict where an action takes the agent, so this table is the single
+# definition of what an action *means*; step() and SafetyShield both read it
+# rather than each hardcoding their own copy.
+ACTION_THRUST_DIRS = np.array([
+    [0.0,  1.0, 0.0],   # 0: +Y
+    [0.0, -1.0, 0.0],   # 1: -Y
+    [-1.0, 0.0, 0.0],   # 2: -X
+    [1.0,  0.0, 0.0],   # 3: +X
+], dtype=np.float64)
+
+# sphere2.urdf's base mass. globalScaling resizes the geometry but does NOT
+# rescale mass, so this holds regardless of the 0.5 scaling in reset().
+# Thrust acceleration available to the agent is force_mag / AGENT_MASS.
+AGENT_MASS = 10.0
+
 
 class SafeNav3DEnv(gym.Env):
     metadata = {"render_modes": ["human", "direct"]}
@@ -200,12 +216,7 @@ class SafeNav3DEnv(gym.Env):
 
     def step(self, action):
         cid = self._client
-        force = [0.0, 0.0, 0.0]
-        mag = self.force_mag
-        if   action == 0: force[1] =  mag
-        elif action == 1: force[1] = -mag
-        elif action == 2: force[0] = -mag
-        elif action == 3: force[0] =  mag
+        force = (ACTION_THRUST_DIRS[int(action)] * self.force_mag).tolist()
 
         # applyExternalForce only lasts a single substep, so one env step held
         # thrust for 1/240s -- 0.005 m/s of delta-v, far too little to cross the

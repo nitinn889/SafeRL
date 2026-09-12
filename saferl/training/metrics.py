@@ -10,6 +10,10 @@ class MetricsCallback(BaseCallback):
         self.episode_rewards = []
         self.episode_costs = []
         self.episode_interventions = []
+        # phase 5: a boxed-in fallback (no action kept the agent clear) is a
+        # materially different event from a normal substitution, so it is
+        # tracked separately rather than folded into the intervention count.
+        self.episode_fallback_interventions = []
         self._step_cost = 0  # accumulator between episode boundaries
 
     def _on_step(self) -> bool:
@@ -27,6 +31,8 @@ class MetricsCallback(BaseCallback):
                 if isinstance(env, ShieldedEnv):
                     break
                 env = env.env
-            ivs = env.interventions if isinstance(env, ShieldedEnv) else 0
-            self.episode_interventions.append(ivs)
+            is_shielded = isinstance(env, ShieldedEnv)
+            self.episode_interventions.append(env.interventions if is_shielded else 0)
+            self.episode_fallback_interventions.append(
+                env.fallback_interventions if is_shielded else 0)
         return True
