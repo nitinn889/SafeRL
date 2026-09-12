@@ -1,6 +1,4 @@
-"""Phase 3 Goal A: bring up a real PIE session with the satellite + debris
-field visible, drive it from the phase 2 reset()/step() loop, and measure
-the tick-bound step rate that the phase 2 commandlet spike could not get.
+"""PIE session driver for the SafeRL UE visualization.
 
 Launch (full GUI editor -- NOT headless, NOT -nullrhi, NOT a commandlet):
     SAFERL_RUN_PIE=1 UnrealEditor SafeRLUESpike.uproject -log
@@ -9,18 +7,22 @@ Launch (full GUI editor -- NOT headless, NOT -nullrhi, NOT a commandlet):
 when SAFERL_RUN_PIE=1 is set.
 
 Do NOT launch this with -ExecutePythonScript: that flag makes the editor
-quit as soon as the script returns, which is what actually killed both the
-phase 2 tick-callback attempt and the first phase 3 attempt. Phase 2
-attributed that to "-nullrhi has nothing keeping it alive"; the real cause
-is the flag itself, and it fires the same way in a full GUI session.
+quit as soon as the script returns.
 
 State machine (all driven from a slate post-tick callback):
-    boot -> build scene, request PIE
+    boot -> import meshes, build scene, request PIE
     waiting_for_pie -> poll until the PIE world exists and holds our actor
     running -> one env step per engine tick, timed; screenshot partway
     done -> stop counting, leave the editor and PIE session up
+
+Phase 8 visual fidelity changes:
+    - Satellite: composite actor (body + solar panels + antenna boom + dish)
+    - Debris: imported irregular rock meshes (perturbed icospheres)
+    - Sky: large inverted dome with dark material
+    - Lighting: single harsh directional light, minimal ambient
 """
 import json
+import math
 import os
 import time
 
@@ -38,22 +40,40 @@ DEBRIS_ENV_POS = [            # fixed (not random) so the visual is reproducible
     (6.5, 4.0, 0.5),
     (7.0, 7.0, 0.5),
 ]
+# per-debris rotation (degrees) for visual variety
+DEBRIS_ROTATIONS = [
+    (0, 0, 0),
+    (45, 30, 0),
+    (0, 60, 20),
+    (25, 0, 70),
+    (10, 45, 55),
+]
+# per-debris non-uniform scale for further variety
+DEBRIS_SCALES = [
+    (1.8, 1.4, 2.0),
+    (1.5, 2.2, 1.3),
+    (2.0, 1.6, 1.8),
+    (1.3, 1.9, 2.1),
+    (2.2, 1.5, 1.7),
+]
 
 SATELLITE_TAG = "SafeRLSatellite"
+SATELLITE_PART_TAG = "SafeRLSatPart"
 DEBRIS_TAG = "SafeRLDebris"
 GOAL_TAG = "SafeRLGoal"
 CAPTURE_TAG = "SafeRLCapture"
-ALL_TAGS = (SATELLITE_TAG, DEBRIS_TAG, GOAL_TAG, CAPTURE_TAG)
+SKY_TAG = "SafeRLSky"
+LIGHT_TAG = "SafeRLLight"
+ALL_TAGS = (SATELLITE_TAG, SATELLITE_PART_TAG, DEBRIS_TAG, GOAL_TAG,
+            CAPTURE_TAG, SKY_TAG, LIGHT_TAG)
 
 NUM_STEPS = 500
-BOOT_TICKS = 120          # let the editor settle before touching the level
+BOOT_TICKS = 120
 DT = 1.0 / 30.0
 FORCE_ACCEL = 400.0
-MAX_SPEED = 900.0         # cm/s, keeps the satellite on screen and watchable
-GOAL_RADIUS = 1.0 * SCALE # matches the env's goal_threshold of 1.0 env units
+MAX_SPEED = 900.0
+GOAL_RADIUS = 1.0 * SCALE
 
-# Camera set side-on to the start->goal diagonal (not along it, or the actors
-# stack up in a line), pitched down ~35 degrees onto the middle of the field.
 CAM_LOCATION = unreal.Vector(2600.0, -900.0, 1800.0)
 CAM_ROTATION = unreal.Rotator(0.0, -34.5, 133.4)
 ACTION_TABLE = {
@@ -64,9 +84,8 @@ ACTION_TABLE = {
 }
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+MESH_DIR = os.path.normpath(os.path.join(_HERE, "..", "Meshes"))
 
-# Phase 4 Goal B knobs. Defaults reproduce the phase 3 protocol exactly
-# (capped frame rate, one env step per rendered frame) so numbers compare.
 UNCAP_FRAMERATE = os.environ.get("SAFERL_UNCAP") == "1"
 STEPS_PER_TICK = int(os.environ.get("SAFERL_STEPS_PER_TICK", "1"))
 RESULTS_NAME = os.environ.get("SAFERL_RESULTS_NAME", "pie_session_results.json")
@@ -74,17 +93,19 @@ RESULTS_PATH = os.path.normpath(os.path.join(_HERE, "..", "..", RESULTS_NAME))
 
 SPHERE = "/Engine/BasicShapes/Sphere.Sphere"
 CUBE = "/Engine/BasicShapes/Cube.Cube"
-
+CYLINDER = "/Engine/BasicShapes/Cylinder.Cylinder"
+CONE = "/Engine/BasicShapes/Cone.Cone"
 
 HEARTBEAT_PATH = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "pie_heartbeat.log")
+    os.path.join(_HERE, "..", "..", "pie_heartbeat.log")
 )
+
+# content path where imported debris meshes land
+DEBRIS_CONTENT_PATH = "/Game/Meshes"
 
 
 def _log(msg):
     unreal.log(f"[saferl-pie] {msg}")
-    # UE's own log buffering stalls under load, so mirror to a plain file we
-    # can watch from outside the engine
     try:
         with open(HEARTBEAT_PATH, "a") as f:
             f.write(f"{time.time():.3f} {msg}\n")
@@ -93,9 +114,6 @@ def _log(msg):
 
 
 def _disable_background_throttle():
-    """The editor throttles its tick rate hard when its window isn't the
-    foreground app, which starves the step loop while we drive it from a
-    terminal. Turn that off for this session."""
     try:
         settings = unreal.get_default_object(unreal.EditorPerformanceSettings)
         settings.set_editor_property("throttle_cpu_when_not_foreground", False)
@@ -105,8 +123,6 @@ def _disable_background_throttle():
 
 
 def _uncap_framerate(game_world):
-    """Remove the frame-rate ceiling so the tick loop is not pinned to a
-    display-refresh-shaped cap. Console CVars only -- no engine changes."""
     for cmd in ("t.MaxFPS 0", "r.VSync 0", "Slate.AllowThrottling 0"):
         try:
             unreal.SystemLibrary.execute_console_command(game_world, cmd)
@@ -119,67 +135,248 @@ def _env_to_world(env_pos):
     return unreal.Vector(env_pos[0] * SCALE, env_pos[1] * SCALE, env_pos[2] * SCALE)
 
 
-def _spawn(mesh_path, env_pos, label, tag, scale):
-    subsys = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
-    actor = subsys.spawn_actor_from_class(unreal.StaticMeshActor, _env_to_world(env_pos))
-    actor.set_actor_label(label)
-    actor.tags = [tag]
-    comp = actor.static_mesh_component
-    comp.set_static_mesh(unreal.EditorAssetLibrary.load_asset(mesh_path))
-    comp.set_mobility(unreal.ComponentMobility.MOVABLE)
-    actor.set_actor_scale3d(unreal.Vector(scale, scale, scale))
-    _log(f"spawned {label} at env {env_pos}")
-    return actor
+def _subsys():
+    return unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
 
+
+# ── mesh import ─────────────────────────────────────────────────────────────
+
+def _import_obj_meshes():
+    """Import OBJ debris rock meshes into UE content if not already present."""
+    asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
+    tasks = []
+
+    for i in range(5):
+        asset_name = f"debris_rock_{i}"
+        content_path = f"{DEBRIS_CONTENT_PATH}/{asset_name}"
+        if unreal.EditorAssetLibrary.does_asset_exist(content_path):
+            _log(f"asset {content_path} already exists, skipping import")
+            continue
+
+        obj_path = os.path.join(MESH_DIR, f"{asset_name}.obj")
+        if not os.path.isfile(obj_path):
+            _log(f"WARNING: {obj_path} not found, debris {i} will use fallback cube")
+            continue
+
+        task = unreal.AssetImportTask()
+        task.filename = obj_path
+        task.destination_path = DEBRIS_CONTENT_PATH
+        task.destination_name = asset_name
+        task.automated = True
+        task.save = True
+        task.replace_existing = True
+        tasks.append(task)
+        _log(f"queued import: {obj_path} -> {content_path}")
+
+    # sky dome
+    sky_content = f"{DEBRIS_CONTENT_PATH}/sky_dome"
+    if not unreal.EditorAssetLibrary.does_asset_exist(sky_content):
+        sky_obj = os.path.join(MESH_DIR, "sky_dome.obj")
+        if os.path.isfile(sky_obj):
+            task = unreal.AssetImportTask()
+            task.filename = sky_obj
+            task.destination_path = DEBRIS_CONTENT_PATH
+            task.destination_name = "sky_dome"
+            task.automated = True
+            task.save = True
+            task.replace_existing = True
+            tasks.append(task)
+            _log(f"queued import: {sky_obj} -> {sky_content}")
+
+    if tasks:
+        asset_tools.import_asset_tasks(tasks)
+        _log(f"imported {len(tasks)} mesh assets")
+    else:
+        _log("all mesh assets already imported")
+
+
+def _load_debris_mesh(index):
+    """Load an imported debris rock mesh, falling back to a basic shape."""
+    asset_path = f"{DEBRIS_CONTENT_PATH}/debris_rock_{index}.debris_rock_{index}"
+    mesh = unreal.EditorAssetLibrary.load_asset(asset_path)
+    if mesh is not None:
+        return mesh
+    # fallback: try without doubled name (import naming varies)
+    asset_path = f"{DEBRIS_CONTENT_PATH}/debris_rock_{index}"
+    mesh = unreal.EditorAssetLibrary.load_asset(asset_path)
+    if mesh is not None:
+        return mesh
+    _log(f"WARNING: could not load debris_rock_{index}, using fallback cone")
+    return unreal.EditorAssetLibrary.load_asset(CONE)
+
+
+def _load_sky_dome_mesh():
+    """Load the imported sky dome mesh."""
+    for path in (f"{DEBRIS_CONTENT_PATH}/sky_dome.sky_dome",
+                 f"{DEBRIS_CONTENT_PATH}/sky_dome"):
+        mesh = unreal.EditorAssetLibrary.load_asset(path)
+        if mesh is not None:
+            return mesh
+    _log("WARNING: sky dome mesh not available, using fallback sphere")
+    return unreal.EditorAssetLibrary.load_asset(SPHERE)
+
+
+# ── satellite (composite actor from basic shapes) ───────────────────────────
+
+def _spawn_satellite(env_pos):
+    """Spawn a composite satellite: body + two solar panels + antenna boom."""
+    subsys = _subsys()
+    world_pos = _env_to_world(env_pos)
+
+    # body: rectangular box
+    body = subsys.spawn_actor_from_class(unreal.StaticMeshActor, world_pos)
+    body.set_actor_label("SafeRL_Satellite_Body")
+    body.tags = [SATELLITE_TAG]
+    comp = body.static_mesh_component
+    comp.set_static_mesh(unreal.EditorAssetLibrary.load_asset(CUBE))
+    comp.set_mobility(unreal.ComponentMobility.MOVABLE)
+    body.set_actor_scale3d(unreal.Vector(1.2, 0.8, 0.6))
+
+    def attach_part(mesh_path, label, offset, scale, rotation=None):
+        loc = unreal.Vector(world_pos.x + offset[0],
+                            world_pos.y + offset[1],
+                            world_pos.z + offset[2])
+        part = subsys.spawn_actor_from_class(unreal.StaticMeshActor, loc)
+        part.set_actor_label(label)
+        part.tags = [SATELLITE_PART_TAG]
+        c = part.static_mesh_component
+        c.set_static_mesh(unreal.EditorAssetLibrary.load_asset(mesh_path))
+        c.set_mobility(unreal.ComponentMobility.MOVABLE)
+        part.set_actor_scale3d(unreal.Vector(*scale))
+        if rotation:
+            part.set_actor_rotation(unreal.Rotator(*rotation), False)
+        part.attach_to_actor(body, "", unreal.AttachmentRule.KEEP_WORLD,
+                             unreal.AttachmentRule.KEEP_WORLD,
+                             unreal.AttachmentRule.KEEP_WORLD, True)
+        return part
+
+    # solar panel left (thin wide rectangle)
+    attach_part(CUBE, "SafeRL_Satellite_PanelL",
+                (-220, 0, 0), (0.05, 1.6, 0.5))
+
+    # solar panel right
+    attach_part(CUBE, "SafeRL_Satellite_PanelR",
+                (220, 0, 0), (0.05, 1.6, 0.5))
+
+    # antenna boom (thin cylinder rising from body)
+    attach_part(CYLINDER, "SafeRL_Satellite_Antenna",
+                (0, 0, 100), (0.1, 0.1, 1.2))
+
+    # dish at top of antenna
+    attach_part(SPHERE, "SafeRL_Satellite_Dish",
+                (0, 0, 180), (0.3, 0.3, 0.15))
+
+    _log(f"spawned composite satellite at env {env_pos}")
+    return body
+
+
+# ── scene construction ──────────────────────────────────────────────────────
 
 def build_scene():
-    """Spawn satellite, goal marker, debris field, and a light."""
-    subsys = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    """Build the full visual scene: satellite, debris, sky dome, lighting."""
+    subsys = _subsys()
 
-    # clear actors from a previous run so re-runs are idempotent
+    # clear actors from a previous run
     for actor in subsys.get_all_level_actors():
         tags = [str(t) for t in (actor.tags or [])]
         if any(t in ALL_TAGS for t in tags):
             subsys.destroy_actor(actor)
 
-    _spawn(SPHERE, START_ENV_POS, "SafeRL_Satellite", SATELLITE_TAG, 2.2)
-    _spawn(SPHERE, GOAL_ENV_POS, "SafeRL_Goal", GOAL_TAG, 3.0)
+    # remove default sky atmosphere / sky light / fog if present
+    for actor in subsys.get_all_level_actors():
+        cls_name = actor.get_class().get_name()
+        if cls_name in ("SkyAtmosphere", "SkyLight", "ExponentialHeightFog",
+                        "VolumetricCloud", "BP_Sky_Sphere_C"):
+            subsys.destroy_actor(actor)
+            _log(f"removed default {cls_name}")
+
+    # import OBJ meshes if needed
+    _import_obj_meshes()
+
+    # ── sky dome (large dark sphere with inverted normals) ──
+    sky_mesh = _load_sky_dome_mesh()
+    sky = subsys.spawn_actor_from_class(
+        unreal.StaticMeshActor,
+        unreal.Vector(ENV_SIZE * SCALE / 2, ENV_SIZE * SCALE / 2, 0),
+    )
+    sky.set_actor_label("SafeRL_SkyDome")
+    sky.tags = [SKY_TAG]
+    sky_comp = sky.static_mesh_component
+    sky_comp.set_static_mesh(sky_mesh)
+    sky_comp.set_mobility(unreal.ComponentMobility.STATIC)
+    _log("spawned sky dome")
+
+    # ── satellite ──
+    _spawn_satellite(START_ENV_POS)
+
+    # ── goal marker (small bright sphere) ──
+    goal = subsys.spawn_actor_from_class(
+        unreal.StaticMeshActor, _env_to_world(GOAL_ENV_POS))
+    goal.set_actor_label("SafeRL_Goal")
+    goal.tags = [GOAL_TAG]
+    goal_comp = goal.static_mesh_component
+    goal_comp.set_static_mesh(unreal.EditorAssetLibrary.load_asset(SPHERE))
+    goal_comp.set_mobility(unreal.ComponentMobility.MOVABLE)
+    goal.set_actor_scale3d(unreal.Vector(1.5, 1.5, 1.5))
+    _log("spawned goal marker")
+
+    # ── debris field (imported rock meshes with varied scale/rotation) ──
     for i, pos in enumerate(DEBRIS_ENV_POS):
-        _spawn(CUBE, pos, f"SafeRL_Debris_{i}", DEBRIS_TAG, 1.8)
+        debris_mesh = _load_debris_mesh(i)
+        d = subsys.spawn_actor_from_class(
+            unreal.StaticMeshActor, _env_to_world(pos))
+        d.set_actor_label(f"SafeRL_Debris_{i}")
+        d.tags = [DEBRIS_TAG]
+        dc = d.static_mesh_component
+        dc.set_static_mesh(debris_mesh)
+        dc.set_mobility(unreal.ComponentMobility.MOVABLE)
+        sx, sy, sz = DEBRIS_SCALES[i]
+        d.set_actor_scale3d(unreal.Vector(sx, sy, sz))
+        rx, ry, rz = DEBRIS_ROTATIONS[i]
+        d.set_actor_rotation(unreal.Rotator(rx, ry, rz), False)
+        _log(f"spawned debris {i} at env {pos}")
 
-    light = subsys.spawn_actor_from_class(unreal.DirectionalLight, unreal.Vector(0, 0, 1500))
-    light.set_actor_label("SafeRL_Light")
-    light.set_actor_rotation(unreal.Rotator(0, -50, 30), False)
+    # ── lighting: single harsh directional light (distant sun) ──
+    sun = subsys.spawn_actor_from_class(
+        unreal.DirectionalLight,
+        unreal.Vector(0, 0, 1500),
+    )
+    sun.set_actor_label("SafeRL_Sun")
+    sun.tags = [LIGHT_TAG]
+    # pitch down at ~30 degrees, rotated to cast shadows across the field
+    sun.set_actor_rotation(unreal.Rotator(0.0, -30.0, 160.0), False)
+    light_comp = sun.light_component
+    light_comp.set_editor_property("intensity", 8.0)
+    # harsh shadows, no volumetric scattering
+    light_comp.set_editor_property("cast_shadows", True)
+    try:
+        light_comp.set_editor_property("atmospheric_sun_light", False)
+    except Exception:
+        pass
+    try:
+        light_comp.set_editor_property("use_temperature", True)
+        light_comp.set_editor_property("temperature", 5800.0)
+    except Exception:
+        pass
+    _log("spawned directional sun light")
 
-    # A SceneCapture2D spawned here gets duplicated into the PIE world along
-    # with everything else, giving us a camera we can render a PNG from while
-    # PIE runs. Needed because this host is Wayland: X11 screen grabs of the
-    # editor window come back black, so the engine has to produce the image.
+    # ── scene capture for screenshots ──
     cap = subsys.spawn_actor_from_class(
         unreal.SceneCapture2D, CAM_LOCATION, CAM_ROTATION,
     )
     cap.set_actor_label("SafeRL_Capture")
     cap.tags = [CAPTURE_TAG]
-    # SceneCaptureComponent2D re-renders the whole scene every frame by
-    # default, which stalls the render thread hard enough that post-tick
-    # callbacks stop firing. We only want a frame on demand.
     cap.capture_component2d.set_editor_property("capture_every_frame", False)
     cap.capture_component2d.set_editor_property("capture_on_movement", False)
 
-    # aim the editor viewport at the field so the visual record is useful
     unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).set_level_viewport_camera_info(
         CAM_LOCATION, CAM_ROTATION,
     )
-    _log("scene built")
+    _log("scene built (phase 8 visual fidelity)")
 
 
 def capture_png(game_world, file_name):
-    """Render the live PIE scene through the SceneCapture2D and write a PNG.
-
-    Never raises: a failed screenshot must not take down the measurement.
-    Note UKismetRenderingLibrary is exposed as unreal.RenderingLibrary --
-    UE strips the "Kismet" prefix, same as SystemLibrary/MathLibrary.
-    """
+    """Render the live PIE scene through the SceneCapture2D and write a PNG."""
     try:
         actors = unreal.GameplayStatics.get_all_actors_with_tag(game_world, CAPTURE_TAG)
         if not actors:
@@ -199,7 +396,7 @@ def capture_png(game_world, file_name):
         unreal.RenderingLibrary.export_render_target(
             game_world, render_target, out_dir, file_name
         )
-        comp.texture_target = None   # stop it re-rendering after the shot
+        comp.texture_target = None
         _log(f"wrote {os.path.join(out_dir, file_name)}")
         return True
     except Exception as e:
@@ -209,7 +406,8 @@ def capture_png(game_world, file_name):
         return False
 
 
-# ── the phase 2 reset()/step() loop, now driving a PIE-world actor ────────
+# ── PIE bridge: drives the satellite actor during the step loop ─────────────
+
 class PIEBridge:
     def __init__(self, game_world, actor):
         self.world = game_world
@@ -226,9 +424,6 @@ class PIEBridge:
         self.velocity[0] += ax * DT
         self.velocity[1] += ay * DT
 
-        # speed clamp so the satellite crosses the field at a watchable pace
-        # instead of accelerating off-screen; costs no extra engine calls, so
-        # the throughput measurement is unaffected
         speed = (self.velocity[0] ** 2 + self.velocity[1] ** 2) ** 0.5
         if speed > MAX_SPEED:
             scale = MAX_SPEED / speed
@@ -245,8 +440,6 @@ class PIEBridge:
         return self._read_obs()
 
     def action_toward_goal(self):
-        """Greedy thrust toward the goal -- stands in for a policy so the
-        satellite visibly traverses the debris field during the demo."""
         loc = self.actor.get_actor_location()
         goal = _env_to_world(GOAL_ENV_POS)
         dx, dy = goal.x - loc.x, goal.y - loc.y
@@ -278,7 +471,6 @@ _state = {
 
 
 def _find_satellite_in_pie():
-    """Return (game_world, satellite_actor) once PIE is genuinely up, else None."""
     game_world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
     if game_world is None:
         return None
@@ -299,18 +491,11 @@ def _finish():
         "steps_per_tick": STEPS_PER_TICK,
         "framerate_uncapped": UNCAP_FRAMERATE,
         "mode": "live PIE session, full GUI editor",
-        "note": "tick-bound: steps run inside a slate post-tick callback while a "
-                "real Play-In-Editor session renders, so this rate is capped by the "
-                "engine's actual frame rate -- unlike the phase 2 commandlet number, "
-                "which had no frame loop at all.",
     }
     _log(f"DONE {result}")
     with open(RESULTS_PATH, "w") as f:
         json.dump(result, f, indent=2)
     _log(f"wrote {RESULTS_PATH}")
-    # Screenshots come after the timed run, never during: a SceneCapture2D
-    # holding a 1920x1080 target re-renders the scene and drags the frame rate
-    # from ~95/s to ~6/s, which would poison the measurement.
     _state["phase"] = "posing"
     _state["pose_ticks"] = 0
 
@@ -355,8 +540,6 @@ def _on_tick(delta_seconds):
             return
 
         if _state["phase"] == "posing":
-            # untimed: fly the satellite back out into the field so the
-            # screenshots show it mid-traverse rather than parked on the goal
             bridge = _state["bridge"]
             _state["pose_ticks"] += 1
             bridge.step(bridge.action_toward_goal())
@@ -370,15 +553,11 @@ def _on_tick(delta_seconds):
             return
 
         bridge = _state["bridge"]
-        # STEPS_PER_TICK > 1 decouples env stepping from the render rate: the
-        # engine still renders once, we advance the env several times.
         for _ in range(STEPS_PER_TICK):
             if _state["count"] >= NUM_STEPS:
                 break
             obs = bridge.step(bridge.action_toward_goal())
             _state["count"] += 1
-            # a real episode boundary: on arrival, reset() and fly it again, so
-            # the loop exercises reset as well as step across the run
             if bridge.at_goal():
                 _state["arrivals"] += 1
                 bridge.reset()
