@@ -587,3 +587,241 @@ stopped after one clean measurement set rather than chasing exotic tuning.
   throttle, plus `-nosound` and arming via `init_unreal.py`.
 - Episode termination, the friction fix and the truncation backstop from
   phase 3 are all intact and covered by tests (17 passing).
+
+---
+
+## Phase 5 (2026-09-12): Real shield — least-restrictive safe action
+
+Replaces the phase-1 placeholder with an analytic hard-constraint layer. The
+soft/learned half of the hybrid design (constrained PPO, cost-value head) is
+untouched and remains phase 6's job.
+
+### Goal B first: does the new shield actually avoid collisions the old one caused?
+
+This is the number that matters, so it goes before the design description.
+
+Randomly spawned debris almost never produce a genuine collision course, so
+`saferl/eval/stress_test.py` **constructs** them: pick an intercept time,
+propagate the agent's un-shielded trajectory analytically
+(`p0 + v0·t + ½a·t²`), and place each hazard so that it arrives at that point
+at that time. The encounter is then guaranteed and the shield is the only
+variable. Six scenarios × 25 trials × three arms:
+
+| scenario | no shield | old (random replacement) | new (least-restrictive) |
+|---|---|---|---|
+| `closing_head_on` — debris drifting back down the agent's path | 25/25 | 25/25 (24 intervention-implicated) | **0/25** |
+| `crossing_from_right` — perpendicular cut across the path | 25/25 | 25/25 (25) | **0/25** |
+| `crossing_from_left` — mirror image | 25/25 | 25/25 (25) | **0/25** |
+| `parked_obstacle` — stationary, on the path (control case) | 25/25 | 25/25 (25) | **0/25** |
+| `surrounded` — four stationary hazards ringing the start | 25/25 | 3/25 (3) | **0/25** |
+| `pincer` — two converging flanks plus one ahead | 25/25 | 25/25 (25) | **0/25** |
+| **total collisions** | **150/150** | **128/150** | **0/150** |
+
+Mean closest approach to any hazard tells the same story: 1.14–1.29 units
+un-shielded, 1.17–1.60 under the old shield, **2.01–2.28 under the new one**
+— i.e. the new shield holds the 2.2-unit safe distance it is configured to
+hold, while the old one barely improved on having no shield at all.
+
+**The specific flaw being fixed, measured.** "Intervention-implicated" above
+counts collisions that occurred within one lookahead window of an
+intervention that thrust the agent *toward* the hazard that triggered it.
+That audit is pure geometry — the dot product of the substituted thrust
+direction with the unit vector from agent to hazard — so it judges both
+shields on identical terms rather than through the new shield's own model:
+
+| | old shield | new shield |
+|---|---|---|
+| mean interventions that thrust toward the triggering hazard | 2.7 – 29.1 per episode | **0** (single-hazard scenarios) |
+| collisions implicated by such an intervention | **127 of its 128** | **0** |
+
+So the old shield's collisions were not incidental: essentially every one of
+them was preceded by the shield itself steering the agent into the hazard.
+That is the concrete, measured version of the flaw phase 4 predicted from the
+PRISM design notes.
+
+Two honest caveats. First, in `surrounded` and `pincer` the new shield also
+registers "toward-hazard" interventions (30 and 18 per episode) — with debris
+on several sides, every direction is toward *something*, so the metric is only
+sharp in single-hazard scenarios; its value is that it correlates with
+collisions for the old shield and not for the new one. Second, `no_shield`
+collides 150/150, which is what makes the comparison meaningful: these
+scenarios are lethal by construction, not cherry-picked near-misses.
+
+**Horizon calibration, found the hard way.** At the initially-chosen
+`lookahead_steps=20` (0.83 s), the new shield *still* collided 3/3 on
+`closing_head_on` and every single intervention was a boxed-in fallback. The
+cause is not the selection logic but the horizon: clearing a 2.2-unit safe
+radius sideways from rest at `a = force_mag/mass = 1.2 m/s²` needs
+`0.5·a·t² ≥ ~1.3`, i.e. **t ≈ 1.5 s ≈ 36 steps**. A shorter horizon only sees
+threats that are already unavoidable. At 30 steps it is 0/3 with no
+fallbacks; the default is **40 steps (~1.67 s)**, with the derivation written
+into `configs/default.yaml` next to the value.
+
+Reproduce with `python -m saferl.eval.stress_test --trials 25`; the table and
+raw JSON are checked in at `saferl/eval/stress_results.{txt,json}`.
+
+### Goal A: how the new shield decides
+
+**The trigger now uses relative velocity, not just distance.** For each of
+the four actions the shield propagates a forward model over the lookahead
+window and rejects any action predicted to come within `safe_dist` of any
+hazard:
+
+- agent: constant thrust for the whole horizon, `p(t) = p0 + v0·t + ½a·t²`,
+  with `a` read from `ACTION_THRUST_DIRS` in `base_env.py`;
+- debris: constant velocity, `h(t) = h0 + hv·t`, read straight out of the
+  observation's `[pos(3), vel(3)]` blocks.
+
+Separation is sampled at each of the 40 step boundaries; the action is unsafe
+if the minimum falls below `safe_dist`, and its *time-to-violation* is the
+first sample time at which it does. `t = 0` is deliberately excluded — the
+question is whether this action *leads into* a hazard, not whether the agent
+happens to be near one already. A hazard five units away closing at 3 units/s
+now triggers, and the identical geometry with the hazard receding does not;
+the old distance-only check cannot tell those apart, and a test asserts it
+misses the closing case outright.
+
+**"Least different from intent" is measured in thrust vectors, not action
+indices.** Action indices are meaningless as a distance metric — 0 and 1 are
+adjacent indices but opposite directions (+Y and −Y). The metric used is the
+**Euclidean distance between the two actions' commanded thrust vectors**,
+which is physical: 0 for the same action, `|a|·√2 ≈ 1.70` for a perpendicular
+sidestep, `2|a| = 2.4` for a full reversal. The shield picks the safe action
+minimising that distance, so a sidestep always beats a reversal. Ties — a
+left and a right sidestep are exactly equidistant from a forward intent — are
+broken toward the larger predicted clearance, so the shield dodges away from
+the second-nearest hazard rather than into it.
+
+**Boxed-in fallback.** When no action holds `safe_dist` over the horizon, the
+shield picks the action maximising time-to-violation (tie-broken on
+clearance) — buy time rather than give up. This is tracked distinctly
+everywhere:
+
+- `SafetyShield.n_fallback` vs `n_substituted` vs `n_triggered`;
+- `ShieldedEnv.fallback_interventions` alongside `interventions`;
+- `MetricsCallback.episode_fallback_interventions`, plotted as a second line
+  on the interventions panel;
+- `ShieldDecision.kind ∈ {"none", "substituted", "fallback"}`.
+
+It is a genuinely different situation — "I chose the least-bad option" rather
+than "I found a safe one" — and `surrounded` shows why it still matters: the
+fallback fires on all 60 steps of every trial and the agent survives all 25,
+while the un-shielded arm dies 25/25.
+
+**Richer intervention record.** Every check produces a `ShieldDecision`
+(proposed action, executed action, triggering hazard index, predicted minimum
+distance, time-to-violation, thrust deviation, how many safe actions
+existed), kept on `shield.last_decision` and optionally appended to
+`shield.log` with `keep_log=True`. This is point 8 of the PRISM extraction
+from phase 4, and it is what phase 9's evaluation suite will read.
+
+**`ShieldedEnv` did change, slightly.** Its role is unchanged — call the
+shield, count, pass through; it makes no safety decisions. The one addition is
+the `fallback_interventions` counter, which it fills by reading
+`shield.last_decision.kind`. Collapsing fallbacks into the single
+intervention count would have discarded exactly the signal phase 9 needs, and
+the counter is bookkeeping rather than logic, so it belongs in the wrapper.
+`check_and_fix` still returns the same `(action, intervened)` 2-tuple it did
+in phase 1, so nothing else needed touching.
+
+**Supporting change in `base_env.py`.** `ACTION_THRUST_DIRS` and `AGENT_MASS`
+now live there as the single definition of what an action means; `step()` and
+the shield both read them. Previously `step()` hardcoded the four force
+vectors, so a shield with its own copy could have silently drifted out of
+sync and confidently guarded the wrong world. A test asserts the env's actual
+measured acceleration matches the table for every action, and another asserts
+`AGENT_MASS` still matches the URDF.
+
+### Goal C: tests and training regression
+
+**Tests: 32 passing** (was 17). `tests/test_shield.py` is new and holds 18;
+`tests/test_env.py` keeps the 14 environment tests. The three shield tests
+that were in `test_env.py` moved across unchanged in intent — so all 17
+phase-4 tests still exist and still pass, they are just split by subject now.
+Their observation fixtures were rebuilt on the live 39-wide layout via
+`OBS_HEADER_LEN`/`OBS_PER_HAZARD`; the old ones were hand-built on the
+pre-phase-4 24-wide stride and only passed by accident.
+
+Covering the four required cases: a hazard closing by velocity alone (with
+the receding mirror image, and an assertion that the old shield misses it);
+sidestep-preferred-over-reversal with a determinism check across 20 repeated
+calls; the boxed-in fallback picking the flee direction that delays the
+breach longest; and four no-intervention regressions, including a hazard
+tracking alongside the agent at matched velocity — close, but never closing.
+
+**Training regression: 30k timesteps, no crash.** 30 episodes recorded (phase
+4's baseline was also 30), 1036 fps — the shield's per-step cost is not
+measurable against PyBullet's, since the whole lookahead is one vectorised
+`(4 actions × 5 hazards × 40 samples)` numpy pass. Interventions are logged
+with the new signal: `30720 checks, 54 triggered (54 substituted, 0 boxed-in
+fallbacks)`.
+
+A same-seed 30k run under each shield:
+
+| | episodes | goals | crashes | truncations | triggered |
+|---|---|---|---|---|---|
+| old random shield | 31 | 0 | 1 | 30 | 200 |
+| new shield | 30 | 0 | **0** | 30 | 181 |
+
+As expected and as phase 4 predicted, the policy has not learned to navigate
+— every episode still ends at the 1000-step truncation cap, and reward is
+flat at −100 (the accumulated step cost). **One crash avoided is a sample of
+one** and should not be read as a training-time safety result; the stress
+test is where the real evidence is. The point of this run is that nothing
+crashed, episodes are still recorded, and the richer intervention signal
+flows all the way through to the plot.
+
+### Open questions / deferred decisions
+
+1. **`safe_dist = 2.2` is marginal against the agent's control authority.**
+   At 1.2 m/s² the agent needs ~1.5 s to clear that radius sideways, which is
+   why the horizon has to be so long. Either number could move: a smaller
+   `safe_dist`, a larger `force_mag`, or slower debris would all buy margin.
+   I left all three alone because changing them would invalidate the phase
+   3/4 baselines mid-comparison — but this is a real tuning decision and
+   it is yours.
+2. **The forward model ignores boundary reflection.** A hazard predicted to
+   fly out of the play area actually bounces. Ignoring it is the conservative
+   direction (a bounce can only move a hazard away from its straight-line
+   prediction near a wall), so I left it, but it makes the shield slightly
+   pessimistic near edges.
+3. **The lookahead assumes the action is held for the full horizon**, which
+   it is not — the shield re-decides every step. This makes the check
+   conservative rather than optimistic, which is the right way to be wrong,
+   but it does mean the shield rejects some actions that would in fact have
+   been recoverable.
+4. **No PCTL spec yet.** Points 2, 3, 4, 6 and 7 of the phase-4 PRISM
+   extraction (abstract state buckets, conservative rounding, a written PCTL
+   safety spec, an offline probability table, rollout-calibrated transition
+   probabilities) are still unimplemented. This phase built the deterministic
+   analytic layer only. Whether the probabilistic layer is worth adding on
+   top is a real question, not a foregone conclusion — the analytic shield
+   already scores 0/150.
+5. **The reward still gives no credit for near-miss avoidance**, carried over
+   from phase 4 and now more pointed: the shield is doing safety work the
+   policy is never rewarded for and cannot see.
+
+### What Phase 6 (constrained PPO / learned soft layer) should assume
+
+- **The hard layer is real and works.** `SafetyShield` enforces a
+  velocity-aware constraint and picks the least-restrictive safe action;
+  0/150 collisions on scenarios that kill an unshielded agent 150/150. Phase
+  6 adds the *soft* layer on top — it does not need to re-derive this one.
+- **Interventions carry structure now.** `ShieldDecision` per step,
+  `n_triggered`/`n_substituted`/`n_fallback` on the shield,
+  `interventions`/`fallback_interventions` on `ShieldedEnv`, and both lists on
+  `MetricsCallback`. A cost-value head can be trained against the shield's own
+  trigger signal, not just the env's terminal `cost`.
+- **`check_and_fix(obs, action) -> (action, intervened)` is stable.** Extra
+  signal arrives on `shield.last_decision`, so a Lagrangian wrapper can read
+  it without changing the call contract.
+- **The action space is still `Discrete(4)`** and the observation still 39-wide.
+  Continuous control was explicitly out of scope this phase; the shield's
+  selection loop enumerates actions, so it would need a different formulation
+  (a projection or a QP) to go continuous.
+- **The policy still does not reach the goal within 30k steps.** Reward is
+  flat at −100 with every episode truncating. Phase 6 should expect to fix
+  learning, not just safety — and the shield now guarantees the exploration
+  it does is not fatal.
+- Training stays in PyBullet (~1036 fps measured again this phase, unchanged
+  by the shield). UE remains rendering/demo only.
