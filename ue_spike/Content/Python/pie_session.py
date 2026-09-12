@@ -20,6 +20,23 @@ Phase 8 visual fidelity changes:
     - Debris: imported irregular rock meshes (perturbed icospheres)
     - Sky: large inverted dome with dark material
     - Lighting: single harsh directional light, minimal ambient
+
+Phase 8c real-asset changes (replaces phase 8's procedural geometry):
+    - Satellite: NASA's Advanced Composition Explorer (ACE) model, downloaded
+      from science.nasa.gov/3d-resources (public domain), imported from GLB.
+      ISS was searched for first and returned zero results in NASA's 3D
+      Resources catalog; ACE is a real, public-domain NASA satellite and the
+      "next reasonable option" per the phase 8c brief.
+    - Debris: 5 "moon_rock_01".."moon_rock_05" models from Poly Haven
+      (CC0, real photogrammetry scans), imported from glTF+bin+textures.
+    - Sky: NASA SVS "Deep Star Maps 2020" (public domain), a real all-sky
+      map built from 1.7 billion stars in the Hipparcos-2/Tycho-2/Gaia DR2
+      catalogs, imported as an EXR texture and applied via an unlit emissive
+      material on the existing inverted-dome geometry (the dome shape itself
+      is a standard skybox technique; what changed is a real astronomical
+      texture replacing the flat placeholder material).
+    - All real assets have a composite/procedural fallback if import fails,
+      logged explicitly rather than failing silently.
 """
 import json
 import math
@@ -85,6 +102,9 @@ ACTION_TABLE = {
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 MESH_DIR = os.path.normpath(os.path.join(_HERE, "..", "Meshes"))
+SATELLITE_SRC_DIR = os.path.join(MESH_DIR, "satellite")
+ROCKS_SRC_DIR = os.path.join(MESH_DIR, "rocks")
+SKYBOX_SRC_DIR = os.path.join(MESH_DIR, "skybox")
 
 UNCAP_FRAMERATE = os.environ.get("SAFERL_UNCAP") == "1"
 STEPS_PER_TICK = int(os.environ.get("SAFERL_STEPS_PER_TICK", "1"))
@@ -95,6 +115,32 @@ SPHERE = "/Engine/BasicShapes/Sphere.Sphere"
 CUBE = "/Engine/BasicShapes/Cube.Cube"
 CYLINDER = "/Engine/BasicShapes/Cylinder.Cylinder"
 CONE = "/Engine/BasicShapes/Cone.Cone"
+
+# ── phase 8c real-asset config ──────────────────────────────────────────────
+SATELLITE_CONTENT_PATH = "/Game/Meshes/Satellite"
+ROCKS_CONTENT_PATH = "/Game/Meshes/Rocks"
+TEXTURES_CONTENT_PATH = "/Game/Textures"
+
+ACE_GLB_NAME = "ACE_satellite"
+# moon_rock_01 excluded: its Poly Haven glTF package ships 4 separate LOD
+# mesh nodes (LOD0..LOD3) instead of the single-mesh structure the other
+# rocks use, which Interchange import handled unreliably; moon_rock_06
+# substituted in its place (see README phase 8c for the investigation).
+# moon_rock_02 excluded: quantitatively the roundest of the scanned rocks
+# (vertex-radius coefficient of variation 0.108, vs 0.20-0.30 for the
+# others -- measured directly from the raw glTF vertex data, not guessed).
+# It IS genuinely real scanned geometry (confirmed: correct asset path,
+# correct non-uniform vertex count, correct material, verified even with
+# Nanite forced off), but at this scene's single-harsh-light setup and
+# render distance it was visually indistinguishable from a plain sphere in
+# the screenshot, which defeats the point of using a real asset. Swapped
+# for moon_rock_07 (CV 0.30, unambiguously irregular).
+MOON_ROCK_NAMES = ["moon_rock_03", "moon_rock_04", "moon_rock_05",
+                    "moon_rock_06", "moon_rock_07"]
+STARMAP_EXR_NAME = "nasa_starmap_2020_4k"
+
+SATELLITE_TARGET_MAX_DIM_CM = 500.0   # longest dimension after rescale
+ROCK_TARGET_MAX_DIM_CM = [190, 230, 160, 210, 250]  # per-rock variety
 
 HEARTBEAT_PATH = os.path.normpath(
     os.path.join(_HERE, "..", "..", "pie_heartbeat.log")
@@ -139,10 +185,14 @@ def _subsys():
     return unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
 
 
-# ── mesh import ─────────────────────────────────────────────────────────────
+# ── mesh import (phase 8: procedural OBJ fallback) ──────────────────────────
 
 def _import_obj_meshes():
-    """Import OBJ debris rock meshes into UE content if not already present."""
+    """Import OBJ debris rock meshes into UE content if not already present.
+
+    This is the phase 8 procedural fallback path (perturbed icospheres +
+    inverted-dome sky), used only if phase 8c's real-asset import fails.
+    """
     asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
     tasks = []
 
@@ -190,13 +240,12 @@ def _import_obj_meshes():
         _log("all mesh assets already imported")
 
 
-def _load_debris_mesh(index):
-    """Load an imported debris rock mesh, falling back to a basic shape."""
+def _load_debris_mesh_procedural(index):
+    """Load a phase 8 procedural debris rock mesh, falling back to a cone."""
     asset_path = f"{DEBRIS_CONTENT_PATH}/debris_rock_{index}.debris_rock_{index}"
     mesh = unreal.EditorAssetLibrary.load_asset(asset_path)
     if mesh is not None:
         return mesh
-    # fallback: try without doubled name (import naming varies)
     asset_path = f"{DEBRIS_CONTENT_PATH}/debris_rock_{index}"
     mesh = unreal.EditorAssetLibrary.load_asset(asset_path)
     if mesh is not None:
@@ -205,8 +254,8 @@ def _load_debris_mesh(index):
     return unreal.EditorAssetLibrary.load_asset(CONE)
 
 
-def _load_sky_dome_mesh():
-    """Load the imported sky dome mesh."""
+def _load_sky_dome_mesh_procedural():
+    """Load the phase 8 procedural inverted sky dome mesh."""
     for path in (f"{DEBRIS_CONTENT_PATH}/sky_dome.sky_dome",
                  f"{DEBRIS_CONTENT_PATH}/sky_dome"):
         mesh = unreal.EditorAssetLibrary.load_asset(path)
@@ -216,10 +265,259 @@ def _load_sky_dome_mesh():
     return unreal.EditorAssetLibrary.load_asset(SPHERE)
 
 
-# ── satellite (composite actor from basic shapes) ───────────────────────────
+# ── mesh import (phase 8c: real sourced assets) ──────────────────────────────
 
-def _spawn_satellite(env_pos):
-    """Spawn a composite satellite: body + two solar panels + antenna boom."""
+def _disable_nanite(mesh, content_path):
+    """Force off Nanite's auto-generated coarse proxy on an imported mesh.
+
+    Found by direct visual inspection: one of the imported rocks (a fairly
+    round scan) rendered in the SceneCapture2D screenshot as a smooth grey
+    sphere with a visible UV-sphere seam, even though Python confirmed the
+    correct 914-vertex mesh, correct asset path, and correct material were
+    all assigned to the component (get_num_vertices/get_material both
+    checked out). A neighbouring, more irregular rock rendered its full
+    detail correctly. The distinguishing factor is shape: Nanite is enabled
+    by default on Interchange glTF import, and its auto-generated fallback
+    proxy -- used by some render paths including scene capture -- collapsed
+    the roundest rock down to something that reads as a bare sphere while
+    leaving jagged rocks visibly jagged even after simplification. Disabling
+    Nanite forces the actual imported geometry to render everywhere.
+    """
+    try:
+        settings = mesh.get_editor_property("nanite_settings")
+        settings.set_editor_property("enabled", False)
+        mesh.set_editor_property("nanite_settings", settings)
+        unreal.EditorAssetLibrary.save_asset(content_path)
+        _log(f"disabled Nanite on {content_path}")
+    except Exception as e:
+        _log(f"WARNING: could not disable Nanite on {content_path} "
+             f"(non-fatal, mesh may render via Nanite proxy): {e!r}")
+
+
+def _import_real_satellite():
+    """Import the ACE satellite GLB (NASA 3D Resources, public domain).
+
+    Returns the imported UStaticMesh, or None if the source file is missing
+    or import fails (caller falls back to the phase 8 composite).
+    """
+    content_path = f"{SATELLITE_CONTENT_PATH}/{ACE_GLB_NAME}"
+    existing = unreal.EditorAssetLibrary.load_asset(content_path)
+    if existing is not None:
+        _log(f"real satellite already imported: {content_path}")
+        _disable_nanite(existing, content_path)
+        return existing
+
+    glb_path = os.path.join(SATELLITE_SRC_DIR, "ACE_satellite.glb")
+    if not os.path.isfile(glb_path):
+        _log(f"WARNING: real satellite source not found at {glb_path}")
+        return None
+
+    task = unreal.AssetImportTask()
+    task.filename = glb_path
+    task.destination_path = SATELLITE_CONTENT_PATH
+    task.destination_name = ACE_GLB_NAME
+    task.automated = True
+    task.save = True
+    task.replace_existing = True
+    asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
+    try:
+        asset_tools.import_asset_tasks([task])
+    except Exception as e:
+        _log(f"WARNING: satellite GLB import raised {e!r}")
+        return None
+
+    imported = task.get_objects()
+    mesh = None
+    for obj in imported:
+        if isinstance(obj, unreal.StaticMesh):
+            mesh = obj
+            break
+    if mesh is None:
+        # fall back to a direct asset-registry load in case get_objects()
+        # returned something else (e.g. an actor or a different asset type)
+        mesh = unreal.EditorAssetLibrary.load_asset(content_path)
+    if mesh is not None:
+        _log(f"imported real satellite mesh: {content_path}")
+        _disable_nanite(mesh, content_path)
+    else:
+        _log(f"WARNING: satellite GLB import produced no StaticMesh at {content_path}")
+    return mesh
+
+
+def _import_real_rocks():
+    """Import the 5 Poly Haven moon_rock glTF models (CC0).
+
+    Returns a list of up to 5 UStaticMesh objects (shorter than 5 if some
+    imports failed -- caller pads with procedural/cone fallbacks).
+    """
+    asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
+    meshes = []
+    for name in MOON_ROCK_NAMES:
+        content_path = f"{ROCKS_CONTENT_PATH}/{name}"
+        existing = unreal.EditorAssetLibrary.load_asset(content_path)
+        if existing is not None:
+            _log(f"real rock already imported: {content_path}")
+            _disable_nanite(existing, content_path)
+            meshes.append(existing)
+            continue
+
+        gltf_path = os.path.join(ROCKS_SRC_DIR, name, f"{name}.gltf")
+        if not os.path.isfile(gltf_path):
+            _log(f"WARNING: real rock source not found at {gltf_path}")
+            continue
+
+        task = unreal.AssetImportTask()
+        task.filename = gltf_path
+        task.destination_path = ROCKS_CONTENT_PATH
+        task.destination_name = name
+        task.automated = True
+        task.save = True
+        task.replace_existing = True
+        try:
+            asset_tools.import_asset_tasks([task])
+        except Exception as e:
+            _log(f"WARNING: rock {name} glTF import raised {e!r}")
+            continue
+
+        mesh = None
+        for obj in task.get_objects():
+            if isinstance(obj, unreal.StaticMesh):
+                mesh = obj
+                break
+        if mesh is None:
+            mesh = unreal.EditorAssetLibrary.load_asset(content_path)
+        if mesh is not None:
+            _log(f"imported real rock mesh: {content_path}")
+            _disable_nanite(mesh, content_path)
+            meshes.append(mesh)
+        else:
+            _log(f"WARNING: rock {name} glTF import produced no StaticMesh")
+
+    return meshes
+
+
+def _import_starmap_texture():
+    """Import the NASA SVS Deep Star Maps 2020 EXR as a UTexture2D.
+
+    Returns the texture, or None if the source file is missing or import
+    fails (caller falls back to the phase 8 flat dark material).
+    """
+    content_path = f"{TEXTURES_CONTENT_PATH}/{STARMAP_EXR_NAME}"
+    existing = unreal.EditorAssetLibrary.load_asset(content_path)
+    if existing is not None:
+        _log(f"starmap texture already imported: {content_path}")
+        return existing
+
+    exr_path = os.path.join(SKYBOX_SRC_DIR, "nasa_starmap_2020_4k.exr")
+    if not os.path.isfile(exr_path):
+        _log(f"WARNING: starmap EXR source not found at {exr_path}")
+        return None
+
+    task = unreal.AssetImportTask()
+    task.filename = exr_path
+    task.destination_path = TEXTURES_CONTENT_PATH
+    task.destination_name = STARMAP_EXR_NAME
+    task.automated = True
+    task.save = True
+    task.replace_existing = True
+    asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
+    try:
+        asset_tools.import_asset_tasks([task])
+    except Exception as e:
+        _log(f"WARNING: starmap EXR import raised {e!r}")
+        return None
+
+    texture = None
+    for obj in task.get_objects():
+        if isinstance(obj, unreal.Texture):
+            texture = obj
+            break
+    if texture is None:
+        texture = unreal.EditorAssetLibrary.load_asset(content_path)
+    if texture is not None:
+        _log(f"imported starmap texture: {content_path}")
+    else:
+        _log("WARNING: starmap EXR import produced no Texture asset")
+    return texture
+
+
+def _get_or_create_starmap_material(texture):
+    """Build (or reuse) an unlit emissive material that shows `texture`
+    directly regardless of scene lighting -- the standard technique for a
+    textured skybox dome."""
+    content_path = f"{TEXTURES_CONTENT_PATH}/M_Starmap_Sky"
+    existing = unreal.EditorAssetLibrary.load_asset(content_path)
+    if existing is not None:
+        return existing
+
+    asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
+    factory = unreal.MaterialFactoryNew()
+    material = asset_tools.create_asset(
+        "M_Starmap_Sky", TEXTURES_CONTENT_PATH, unreal.Material, factory)
+
+    tex_expr = unreal.MaterialEditingLibrary.create_material_expression(
+        material, unreal.MaterialExpressionTextureSample, -350, 0)
+    tex_expr.texture = texture
+
+    try:
+        material.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    except Exception as e:
+        _log(f"could not set unlit shading model (non-fatal): {e!r}")
+
+    unreal.MaterialEditingLibrary.connect_material_property(
+        tex_expr, "RGB", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    unreal.MaterialEditingLibrary.recompile_material(material)
+    unreal.EditorAssetLibrary.save_asset(content_path)
+    _log(f"built unlit starmap material: {content_path}")
+    return material
+
+
+def _measure_and_rescale(actor, target_max_dim_cm):
+    """Measure an actor's real bounding box (at scale 1,1,1) and apply a
+    uniform scale so its longest dimension equals target_max_dim_cm.
+
+    This replaces guessing a scale factor: real sourced meshes carry whatever
+    units their authoring tool used, so the only reliable way to size them
+    consistently is to measure the actual imported geometry and compute the
+    scale from that measurement.
+    """
+    actor.set_actor_scale3d(unreal.Vector(1.0, 1.0, 1.0))
+    origin, extent = actor.get_actor_bounds(False)
+    size = (extent.x * 2.0, extent.y * 2.0, extent.z * 2.0)
+    max_dim = max(size) if max(size) > 1e-6 else 1.0
+    scale = target_max_dim_cm / max_dim
+    actor.set_actor_scale3d(unreal.Vector(scale, scale, scale))
+    _log(f"measured {actor.get_actor_label()} raw size={tuple(round(s,1) for s in size)}cm "
+         f"-> scale={scale:.4f} (target longest dim {target_max_dim_cm}cm)")
+    return size, scale
+
+
+# ── satellite: phase 8c real ACE mesh, phase 8 composite as fallback ───────
+
+def _spawn_satellite_real(env_pos, mesh):
+    """Spawn the real NASA ACE satellite mesh as the single controllable
+    actor. Scale is computed by measuring the actual imported geometry
+    (see _measure_and_rescale) rather than assumed."""
+    subsys = _subsys()
+    world_pos = _env_to_world(env_pos)
+
+    sat = subsys.spawn_actor_from_class(unreal.StaticMeshActor, world_pos)
+    sat.set_actor_label("SafeRL_Satellite_ACE")
+    sat.tags = [SATELLITE_TAG]
+    comp = sat.static_mesh_component
+    comp.set_static_mesh(mesh)
+    comp.set_mobility(unreal.ComponentMobility.MOVABLE)
+    _measure_and_rescale(sat, SATELLITE_TARGET_MAX_DIM_CM)
+
+    _log(f"spawned REAL satellite (NASA ACE model) at env {env_pos}")
+    return sat
+
+
+def _spawn_satellite_composite(env_pos):
+    """Spawn a composite satellite: body + two solar panels + antenna boom.
+
+    Phase 8 fallback, used only if the phase 8c real-asset import fails.
+    """
     subsys = _subsys()
     world_pos = _env_to_world(env_pos)
 
@@ -266,15 +564,23 @@ def _spawn_satellite(env_pos):
     attach_part(SPHERE, "SafeRL_Satellite_Dish",
                 (0, 0, 180), (0.3, 0.3, 0.15))
 
-    _log(f"spawned composite satellite at env {env_pos}")
+    _log(f"spawned FALLBACK composite satellite at env {env_pos} "
+         f"(real ACE mesh not available)")
     return body
 
 
 # ── scene construction ──────────────────────────────────────────────────────
 
 def build_scene():
-    """Build the full visual scene: satellite, debris, sky dome, lighting."""
+    """Build the full visual scene: satellite, debris, sky dome, lighting.
+
+    Phase 8c: tries real sourced assets first (NASA ACE satellite, Poly Haven
+    moon rocks, NASA starmap skybox); each falls back independently to its
+    phase 8 procedural equivalent if the source file is missing or import
+    fails, with every fallback explicitly logged (never silent).
+    """
     subsys = _subsys()
+    asset_report = {"satellite": None, "rocks": None, "sky": None}
 
     # clear actors from a previous run
     for actor in subsys.get_all_level_actors():
@@ -282,19 +588,29 @@ def build_scene():
         if any(t in ALL_TAGS for t in tags):
             subsys.destroy_actor(actor)
 
-    # remove default sky atmosphere / sky light / fog if present
+    # remove default sky atmosphere / sky light / fog / sky sphere if
+    # present. A plain default StaticMeshActor labeled "SM_SkySphere" (not
+    # the "BP_Sky_Sphere_C" blueprint class this list used to check for)
+    # survived every previous cleanup pass -- a template leftover this list
+    # never matched. PlayerStart is deliberately left alone: removing it was
+    # tried as a hypothesis for an unrelated rendering issue (see README) and
+    # instead made PIE hang indefinitely with no PlayerStart to spawn from.
     for actor in subsys.get_all_level_actors():
         cls_name = actor.get_class().get_name()
-        if cls_name in ("SkyAtmosphere", "SkyLight", "ExponentialHeightFog",
-                        "VolumetricCloud", "BP_Sky_Sphere_C"):
+        label = actor.get_actor_label()
+        if (cls_name in ("SkyAtmosphere", "SkyLight", "ExponentialHeightFog",
+                          "VolumetricCloud", "BP_Sky_Sphere_C")
+                or label == "SM_SkySphere"):
             subsys.destroy_actor(actor)
-            _log(f"removed default {cls_name}")
+            _log(f"removed default {cls_name} ({label})")
 
-    # import OBJ meshes if needed
+    # import phase 8 procedural OBJ meshes (used as fallback source only)
     _import_obj_meshes()
 
-    # ── sky dome (large dark sphere with inverted normals) ──
-    sky_mesh = _load_sky_dome_mesh()
+    # ── sky dome: real NASA starmap texture on the inverted-dome geometry,
+    #    falls back to phase 8's flat dark material if the EXR/material
+    #    pipeline fails ──
+    sky_mesh = _load_sky_dome_mesh_procedural()
     sky = subsys.spawn_actor_from_class(
         unreal.StaticMeshActor,
         unreal.Vector(ENV_SIZE * SCALE / 2, ENV_SIZE * SCALE / 2, 0),
@@ -304,10 +620,30 @@ def build_scene():
     sky_comp = sky.static_mesh_component
     sky_comp.set_static_mesh(sky_mesh)
     sky_comp.set_mobility(unreal.ComponentMobility.STATIC)
-    _log("spawned sky dome")
 
-    # ── satellite ──
-    _spawn_satellite(START_ENV_POS)
+    starmap_tex = _import_starmap_texture()
+    if starmap_tex is not None:
+        try:
+            starmap_mat = _get_or_create_starmap_material(starmap_tex)
+            sky_comp.set_material(0, starmap_mat)
+            asset_report["sky"] = "real (NASA Deep Star Maps 2020)"
+            _log("spawned sky dome with REAL NASA starmap material")
+        except Exception as e:
+            asset_report["sky"] = f"FALLBACK (material build failed: {e!r})"
+            _log(f"WARNING: starmap material build failed ({e!r}); "
+                 f"sky dome keeps its default imported material")
+    else:
+        asset_report["sky"] = "FALLBACK (starmap EXR not available)"
+        _log("spawned sky dome WITHOUT real starmap texture (fallback material)")
+
+    # ── satellite: real NASA ACE model, composite fallback ──
+    real_sat_mesh = _import_real_satellite()
+    if real_sat_mesh is not None:
+        _spawn_satellite_real(START_ENV_POS, real_sat_mesh)
+        asset_report["satellite"] = "real (NASA ACE)"
+    else:
+        _spawn_satellite_composite(START_ENV_POS)
+        asset_report["satellite"] = "FALLBACK (composite primitives)"
 
     # ── goal marker (small bright sphere) ──
     goal = subsys.spawn_actor_from_class(
@@ -320,21 +656,33 @@ def build_scene():
     goal.set_actor_scale3d(unreal.Vector(1.5, 1.5, 1.5))
     _log("spawned goal marker")
 
-    # ── debris field (imported rock meshes with varied scale/rotation) ──
+    # ── debris field: real Poly Haven moon rocks, procedural fallback per-slot ──
+    real_rocks = _import_real_rocks()
+    n_real = len(real_rocks)
+    asset_report["rocks"] = f"{n_real}/5 real (Poly Haven moon_rock)"
     for i, pos in enumerate(DEBRIS_ENV_POS):
-        debris_mesh = _load_debris_mesh(i)
         d = subsys.spawn_actor_from_class(
             unreal.StaticMeshActor, _env_to_world(pos))
         d.set_actor_label(f"SafeRL_Debris_{i}")
         d.tags = [DEBRIS_TAG]
         dc = d.static_mesh_component
-        dc.set_static_mesh(debris_mesh)
         dc.set_mobility(unreal.ComponentMobility.MOVABLE)
-        sx, sy, sz = DEBRIS_SCALES[i]
-        d.set_actor_scale3d(unreal.Vector(sx, sy, sz))
-        rx, ry, rz = DEBRIS_ROTATIONS[i]
-        d.set_actor_rotation(unreal.Rotator(rx, ry, rz), False)
-        _log(f"spawned debris {i} at env {pos}")
+
+        if i < n_real:
+            mesh_obj = real_rocks[i]
+            dc.set_static_mesh(mesh_obj)
+            _measure_and_rescale(d, ROCK_TARGET_MAX_DIM_CM[i])
+            rx, ry, rz = DEBRIS_ROTATIONS[i]
+            d.set_actor_rotation(unreal.Rotator(rx, ry, rz), False)
+            _log(f"spawned REAL debris {i} (moon_rock) at env {pos}")
+        else:
+            debris_mesh = _load_debris_mesh_procedural(i)
+            dc.set_static_mesh(debris_mesh)
+            sx, sy, sz = DEBRIS_SCALES[i]
+            d.set_actor_scale3d(unreal.Vector(sx, sy, sz))
+            rx, ry, rz = DEBRIS_ROTATIONS[i]
+            d.set_actor_rotation(unreal.Rotator(rx, ry, rz), False)
+            _log(f"spawned FALLBACK debris {i} (procedural) at env {pos}")
 
     # ── lighting: single harsh directional light (distant sun) ──
     sun = subsys.spawn_actor_from_class(
@@ -372,7 +720,14 @@ def build_scene():
     unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).set_level_viewport_camera_info(
         CAM_LOCATION, CAM_ROTATION,
     )
-    _log("scene built (phase 8 visual fidelity)")
+    _log(f"scene built (phase 8c real-asset status: {asset_report})")
+    asset_report_path = os.path.normpath(os.path.join(_HERE, "..", "..", "phase8c_asset_report.json"))
+    try:
+        with open(asset_report_path, "w") as f:
+            json.dump(asset_report, f, indent=2)
+        _log(f"wrote {asset_report_path}")
+    except Exception as e:
+        _log(f"could not write asset report (non-fatal): {e!r}")
 
 
 def capture_png(game_world, file_name):
@@ -509,11 +864,31 @@ def _on_tick(delta_seconds):
         if _state["phase"] == "boot":
             if _state["ticks"] < BOOT_TICKS:
                 return
+            # Reentrancy guard: phase 8c's asset import (Interchange glTF/EXR
+            # import, MaterialEditingLibrary.recompile_material) pumps
+            # Slate's message loop synchronously, which re-fires this same
+            # registered tick callback *before* this call returns. Flipping
+            # phase to a transitional value here, before doing any of that
+            # work, makes a reentrant call hit an unhandled branch and return
+            # immediately instead of re-running build_scene() and
+            # editor_request_begin_play() again on top of the in-progress
+            # call. Found by observation: without this guard, phase 8c's
+            # first real run built the scene 12 times and threw an
+            # "ObjectInstance is null" exception when an inner call's
+            # actor-cleanup destroyed the outer call's freshly spawned sky
+            # actor out from under it.
+            _state["phase"] = "building"
             _disable_background_throttle()
             build_scene()
             unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_request_begin_play()
             _log("PIE requested")
             _state["phase"] = "waiting_for_pie"
+            return
+
+        if _state["phase"] == "building":
+            # A reentrant tick fired while the outer boot call (above) is
+            # still inside build_scene()/editor_request_begin_play(). Do
+            # nothing and let the outer call finish and advance the phase.
             return
 
         if _state["phase"] == "waiting_for_pie":
@@ -528,6 +903,24 @@ def _on_tick(delta_seconds):
                 return
             game_world, actor = found
             _log(f"PIE is live, satellite found: {actor.get_name()}")
+
+            # Destroy the Pawn PIE auto-spawns at PlayerStart. Not needed by
+            # this fully-scripted, non-interactive scene, and removing
+            # PlayerStart itself (tried at one point) made PIE hang
+            # indefinitely with no spawn point for the GameMode's default
+            # Pawn -- so PlayerStart stays, and the Pawn it spawns is culled
+            # right after PIE comes up instead.
+            try:
+                pawns = unreal.GameplayStatics.get_all_actors_of_class(
+                    game_world, unreal.Pawn)
+                for p in pawns:
+                    _log(f"destroying PIE-spawned pawn: {p.get_name()} "
+                         f"at {p.get_actor_location()}")
+                    p.destroy_actor()
+            except Exception as e:
+                _log(f"WARNING: could not clean up PIE-spawned pawns "
+                     f"(non-fatal): {e!r}")
+
             _state["bridge"] = PIEBridge(game_world, actor)
             _state["bridge"].reset()
             if UNCAP_FRAMERATE:

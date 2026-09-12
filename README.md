@@ -1657,6 +1657,123 @@ All **40 tests still passing** (18 env, 22 shield). No RL/physics code touched. 
 
 ---
 
+## Phase 8c (2026-09-13): Actually Sourcing, Importing, and Verifying Real Assets
+
+Phase 8b's deliverable was infrastructure that *could* load real assets if present — it shipped with no assets actually sourced. This phase does the sourcing, importing, and verification itself, in a live Unreal Editor session, with evidence. This section reports outcomes, not readiness.
+
+### Outcome summary
+
+| Item | Sourced | Imported | Verified working | Notes |
+|---|---|---|---|---|
+| Satellite (real model) | ✅ Yes | ✅ Yes | ✅ Yes | NASA ACE, not ISS (ISS returned 0 results in NASA's catalog — see below) |
+| Rocks (5 real models) | ✅ Yes | ✅ Yes | ⚠️ Partial (4/5) | 1 of 5 shows an unresolved rendering anomaly, extensively investigated, not root-caused |
+| Skybox (real texture) | ✅ Yes | ✅ Yes | ⚠️ Partial | Material built and assigned; starfield not visually prominent in this camera framing (see below) |
+| Control loop | — | — | ✅ Yes | Satellite position tracked correctly through all 500 steps, real mesh, not the composite fallback |
+| Steps/sec | — | — | ✅ Measured | 114–118/s across four independent clean runs (see Performance) |
+
+### Goal A: Satellite
+
+**Source:** NASA searched first, per the brief's priority order. NASA's 3D Resources catalog (science.nasa.gov/3d-resources) was searched for "International Space Station" and returned **zero results** — ISS is not in that catalog. Rather than stopping there, the catalog's "Satellite" collection was browsed directly and **Advanced Composition Explorer (ACE)** was selected: a real NASA solar-wind monitoring satellite, public domain, distributed as a 2.0 MB glTF binary (`.glb`).
+
+- **Download:** `https://assets.science.nasa.gov/content/dam/science/cds/3d/resources/model/advanced-composition-explorer/Advanced%20Composition%20Explorer.glb`
+- **License:** Public Domain (NASA 3D Resources; NASA Images and Media Usage Guidelines)
+- **Geometry:** 1 mesh, 77,334 vertices, 25,778 triangles — real-time friendly
+- **Import:** UE's Interchange glTF importer via `unreal.AssetImportTask`, automated, to `/Game/Meshes/Satellite/ACE_satellite`
+- **Scaling:** The raw imported mesh measured 92150×134530×27798 cm — its authored units are not literally meters despite glTF's nominal convention (a real NASA CAD export, not scaled for this use). Rather than guess a conversion factor, `_measure_and_rescale()` measures the actor's real bounding box in-engine and computes a scale to hit a 500 cm target longest dimension, so the number is derived from the actual imported geometry, not assumed.
+
+**Control-loop verification (done, not deferred):** the PIE step loop drives the *same tagged actor* regardless of which mesh it holds — `PIEBridge.step()`/`.reset()` call `set_actor_location()`/`get_actor_location()` on whatever actor carries `SafeRLSatellite`, independent of mesh. With the real ACE mesh attached, a clean run's heartbeat log shows the satellite's queried position advancing correctly step by step and resetting on goal arrival:
+```
+step 100/500 satellite at [1120.2, 1118.5, 100.0]
+step 200/500 satellite at [616.0, 617.3, 100.0]
+step 300/500 satellite at [260.0, 262.7, 100.0]      <- post-reset (goal arrival)
+step 400/500 satellite at [56.0, 56.4, 100.0]
+step 500/500 satellite at [1587.0, 1584.9, 100.0]
+DONE {'goal_arrivals': 3, ...}
+```
+This is the real ACE mesh, not the composite fallback — confirmed by `asset_report["satellite"] == "real (NASA ACE)"` on every successful run this phase, and visually in every screenshot (recognizable body + solar panels, not the phase 8 primitive composite).
+
+### Goal B: Rocks
+
+**Source:** Poly Haven (`polyhaven.com`), which was checked ahead of Fab/Megascans because it offers direct, scriptable download URLs (no Epic Games Launcher GUI interaction needed) and a real photogrammetry-scanned **"moon_rock"** series — thematically apt for space debris and genuinely real-world scanned geometry, not generic terrestrial rocks.
+
+- **License:** CC0 (public domain, no attribution required)
+- **Format:** glTF (`.gltf` + `.bin` + diffuse/normal/ARM JPEG textures), 1K resolution package
+- **Models used:** `moon_rock_03`, `04`, `05`, `06`, `07` (5 of the catalog's 7 pieces)
+- **Import:** same `AssetImportTask` pipeline as the satellite, to `/Game/Meshes/Rocks/<name>`
+- **Scaling:** same measure-then-rescale approach, targets varying 160–250 cm per rock for visual variety (matching phase 8's per-rock size spread)
+
+**Two models were tried and rejected during sourcing, both by direct evidence, not guesswork:**
+- `moon_rock_01` — its glTF package ships 4 separate LOD mesh nodes (LOD0..LOD3) instead of the single-mesh structure every other rock in the series uses. UE's Interchange import produced 4 separate `moon_rock_01_LOD*.uasset` assets rather than one clean `moon_rock_01` asset, and `_import_real_rocks()`'s "first StaticMesh found" fallback picked an unpredictable one. Rather than add more code to special-case this file's structure, it was dropped in favor of `moon_rock_06` (clean single-mesh structure, confirmed via the raw glTF JSON before downloading).
+- `moon_rock_02` — imports and renders *correctly* (confirmed: correct asset path, correct non-uniform vertex count, correct `MaterialInstanceConstant` assigned, confirmed unaffected by disabling Nanite), but is quantitatively the roundest rock in the set (vertex-radius coefficient of variation 0.108, computed directly from the raw glTF vertex buffer, vs. 0.20–0.30 for the others). Under this scene's single hard directional light with no fill light, at render distance, it was visually indistinguishable from a plain sphere in the screenshot — technically real, practically useless as evidence of "not a placeholder primitive." Swapped for `moon_rock_07` (CV 0.30, unambiguously irregular, verified by the same measurement before downloading).
+
+**Verified: 4 of 5 rock slots.** Four of the five real rocks are directly confirmed correct by close visual inspection of the rendered screenshot — irregular scanned silhouettes, visible surface detail (a small crater/pit is visible on one), tan PBR shading distinct from the flat grey of a primitive. The fifth slot (whichever rock currently occupies array position 0 — tested with `moon_rock_02`, `03`, and `04` in turn, at three different world positions) consistently renders as a small dark sphere with a razor-straight seam line in the final screenshot, **despite Python-level confirmation that the correct mesh (non-round, hundreds-to-thousands of vertices matching the real scan), correct material, correct world position (`get_actor_location()` matched the requested spawn transform exactly), and correct computed scale are all assigned to that actor.**
+
+**What was investigated and ruled out, each with a dedicated test run:**
+1. *Stale/corrupted cached import* (from an earlier, since-fixed reentrancy bug — see Housekeeping) — ruled out: deleted all cached `.uasset` imports and re-imported from scratch; identical result.
+2. *Nanite fallback proxy* — UE5's Interchange import enables Nanite by default, and its auto-generated coarse fallback mesh (used by some render paths) could plausibly collapse a round scan to a smooth shape. Ruled out: explicitly disabled `nanite_settings.enabled` on every imported mesh and rebuilt; identical result.
+3. *Bounding-box measurement race* — theorized that `get_actor_bounds()` on the first-spawned actor in a batch might read stale/zero render-proxy bounds before the very first render tick. Ruled out: the logged measured sizes were correct and matched the true mesh dimensions every time; no degenerate values.
+4. *Array-index-0-specific bug* vs. *world-position-specific* — swapped which world position occupied array index 0 across two different coordinate pairs; the anomaly's on-screen pixel location was identical to five decimal places both times, which first looked like "a fixed screen-space object," but a third test (moving index 0 to a third, novel position, with a distinctly different fallback object placed at the original coordinate) showed the fallback object rendering *correctly* at that original spot and the anomaly persisting at the *new* position — meaning it does track a specific spawned actor, not a fixed coordinate or a fixed screen pixel. Requesting vs. actual queried world position for every debris actor were logged and matched exactly in every case.
+5. *`PlayerStart`'s editor billboard icon leaking into the capture* — `PlayerStart` sits at world (-200,0,92), near the satellite. Tried destroying it during scene cleanup: this did **not** fix the anomaly and instead made PIE hang indefinitely (the standard symptom of a GameMode with nowhere to spawn its default Pawn) — reverted.
+6. *PIE's auto-spawned default Pawn having a visible mesh* — a full PIE-world actor dump (`unreal.GameplayStatics.get_all_actors_of_class(game_world, unreal.Actor)`, every actor, not just tagged ones) found `DefaultPawn_0` at exactly PlayerStart's position. Destroyed it right after PIE goes live (kept, as a real if minor cleanup) — did not change the render; `ADefaultPawn` has no visible mesh by default, so this was a correct finding that turned out not to be the visible culprit.
+7. *Sky dome backface* — the same full actor dump found a `StaticMeshActor` at exactly `(ENV_SIZE*SCALE/2, ENV_SIZE*SCALE/2, 0)` = `(1000,1000,0)`, which is the sky dome's spawn position, raising a theory that the camera sat outside the dome's imported radius and was seeing its backface. Measured the dome's actual imported size (100,000 cm diameter, matching the source OBJ's 50,000-unit radius exactly — no import-time shrinkage) and confirmed the camera (~3068 units from dome center) is deeply inside it; a background object 50,000 units away cannot visually read as a small, sharply-shadowed object a few meters from the satellite. The theory doesn't fit the visual evidence on reflection. A rescale attempted anyway, to eliminate it as a variable, caused severe performance regression (huge `STATIC`-mobility mesh rescale triggers expensive rebuild) for no visual change — reverted.
+
+**Not resolved this phase.** After seven investigated and eliminated hypotheses, the specific rendering mechanism remains unidentified. What's established: the affected slot's *data* (mesh asset, vertex count, material, world transform, scale) is verifiably correct at the Python/engine-API level in every test; the *rendered pixels* for that one slot don't match. This is reported as not-done, honestly, rather than folded into "5/5 real" language — it is **4/5 visually confirmed, 5/5 correctly imported and assigned by every non-visual check available.** The concrete next step for whoever picks this up: interactive editor inspection (click the actor in the outliner, check its Details panel's mesh/material assignment directly, toggle Nanite visualization overlay) — something only possible with GUI interaction, which this scripted-Python-only environment doesn't have.
+
+### Goal C: Skybox
+
+**Source:** NASA SVS (Goddard Space Flight Center Scientific Visualization Studio) **"Deep Star Maps 2020"** — not a generic CC0 HDRI (Poly Haven's HDRI catalog was checked and has no genuine deep-space starfield; it only offers real-world-photographed environments, which by definition can't capture actual deep space). Deep Star Maps 2020 is a real all-sky map plotting 1.7 billion stars from the Hipparcos-2, Tycho-2, and Gaia DR2 catalogs, explicitly built by NASA for spherical mapping in 3D animation software — i.e., designed for exactly this use case.
+
+- **Download:** `svs.gsfc.nasa.gov/vis/a000000/a004800/a004851/starmap_2020_4k.exr` (4096×2048, 36 MB)
+- **License:** Public Domain (NASA/Goddard Space Flight Center SVS; Gaia DR2 data credited to ESA/Gaia/DPAC)
+- **Import:** `AssetImportTask` to `/Game/Textures/nasa_starmap_2020_4k` as a `UTexture2D`
+- **Material:** a fresh unlit-emissive `Material` was built via `unreal.MaterialEditingLibrary` (`create_material_expression` + `connect_material_property` to `MP_EMISSIVE_COLOR`, `shading_model = MSM_UNLIT`) and assigned to the existing inverted-normal dome mesh — the dome-shape technique itself is a standard, legitimate skybox approach; what changed from phase 8 is a real astronomical texture replacing the flat placeholder material.
+
+**Verified: material built and assigned, confirmed by log** (`asset_report["sky"] == "real (NASA Deep Star Maps 2020)"` on every successful run). **Not strongly verified visually**: in this scene's established camera framing (inherited from phase 3, angled to show the ground-level debris field, not looking up), the sky occupies a small fraction of the frame and reads as a plain grey-brown gradient in the screenshots taken this phase, not an obviously star-studded backdrop. The material is real and assigned; whether it reads as "space" to a viewer depends on camera angle, which this phase's evidence doesn't establish either way. Worth a dedicated screenshot from a camera angle that shows more sky before claiming this visually, rather than assuming the existing ground-level shot proves it.
+
+### Goal D: Performance
+
+**Protocol:** same 500-step PIE measurement phase 3 established, `SAFERL_UNCAP=1`.
+
+**Clean measurements (four independent single-build runs, no reentrancy, no accumulated system load):**
+
+| Run | Steps/sec | Scene builds |
+|---|---|---|
+| 1 | 116.24 | 1 |
+| 2 | 118.52 | 1 |
+| 3 | 114.75 | 1 |
+| 4 | 114.18 | 1 |
+
+**Mean: ~115.9/s, vs. phase 3's ~119/s baseline — a ~2.6% difference, within normal run-to-run variance, not a regression.** No collision-proxy simplification was needed.
+
+**Later measurements in this same session degraded sharply** (94.7, then 8.3, 6.7, 5.5, 5.3/s) after roughly a dozen consecutive Editor launch/kill cycles spent on the rock-rendering investigation above. `free -h` at that point showed the host down to ~670 MB free RAM with ~4.8 GB swapped — this machine also runs several other resident applications (multiple browser instances, several desktop AI-assistant apps, an IDE) that were not part of this session and were not closed. This is host memory pressure accumulated over an unusually long same-session investigation, not a phase 8c code regression: the four clean numbers above, each from an isolated fresh launch early in the session, are the honest figures for what this scene costs to render.
+
+### Housekeeping: a real reentrancy bug, found and fixed
+
+Early in this phase, `build_scene()` was found to run up to 12 times per launch, each time destroying and rebuilding the entire scene, occasionally throwing an `ObjectInstance is null` exception. Root cause: `unreal.MaterialEditingLibrary.recompile_material()` (used to build the starmap material) pumps Slate's message loop synchronously, which re-fires the already-registered tick callback *before* the outer call returns — a classic reentrancy bug. Fixed with an explicit `"building"` guard phase in the tick state machine (`_on_tick`), flipped before any of the reentrant-prone import/material calls run, so a nested call hits an early-return branch instead of repeating the whole scene build. Verified fixed: every run after this fix shows exactly 1 scene build in the heartbeat log.
+
+### Files
+
+- `ue_spike/Content/Python/pie_session.py` — real-asset import/spawn/measure functions added directly to the armed script (not a separate unwired file this time); phase 8's procedural functions kept, renamed with `_procedural` suffixes, as explicit fallbacks
+- `ue_spike/Content/Meshes/satellite/ACE_satellite.glb` — sourced, committed (2 MB)
+- `ue_spike/Content/Meshes/rocks/moon_rock_{03,04,05,06,07}/` — sourced, committed (~7 MB total: gltf + bin + textures per rock)
+- `ue_spike/Content/Meshes/skybox/nasa_starmap_2020_4k.exr` — sourced, committed (36 MB)
+- `ue_spike/Content/Meshes/{Rocks,Satellite}/`, `ue_spike/Content/Textures/` — UE-imported `.uasset` derivatives, gitignored (regenerable by running the PIE session against the committed source files)
+- `ue_spike/pie_session_final.png`, `pie_session_midrun.png` — screenshots from the final clean run, referenced above and sent alongside this report
+
+### Tests
+
+All **40 tests still pass**. `saferl/` untouched — `git diff --stat -- saferl/` is empty for this phase. Visual/UE changes only.
+
+### What Phase 10 should assume
+
+1. **Phase 8c is the real baseline for demo capture, with one caveat.** The satellite and 4 of 5 rocks are confirmed-real by direct visual inspection; the 5th rock slot has an open, documented rendering anomaly. Phase 10's demo capture should either accept that anomaly and note it, or spend a short investigation with actual interactive editor access (not available in this session) before capture.
+2. **The sky material is real and assigned but not strongly visually verified.** If phase 10's demo wants to show the starfield prominently, get a screenshot from a camera angle that looks more upward before assuming it reads as intended.
+3. **Performance is fine.** ~116/s clean, matching phase 3. Don't be alarmed by the degraded numbers from mid-investigation in this phase's raw logs — they're a same-session memory-pressure artifact, not a real cost of the current scene, and are explained above rather than hidden.
+4. **RL/physics/shield unchanged**, per every phase since 8. Phase 9's findings and checkpoint stand as-is.
+5. **The reentrancy guard in `_on_tick` is load-bearing.** Don't remove the `"building"` phase or call `MaterialEditingLibrary` (or anything else that might pump Slate) from inside the boot branch without it.
+
+---
+
 ## Phase 9 (2026-09-12): Long training run + TensorBoard dashboard
 
 Extended the constrained training run to convergence under plateau detection,
