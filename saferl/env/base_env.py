@@ -38,10 +38,11 @@ class SafeNav3DEnv(gym.Env):
     metadata = {"render_modes": ["human", "direct"]}
 
     def __init__(self, size=10, max_hazards=5, curriculum=False, render_mode="direct",
-                 force_mag=12.0, goal_threshold=1.0, hazard_threshold=1.3,
+                 force_mag=48.0, goal_threshold=1.0, hazard_threshold=1.3,
                  sim_substeps=10, agent_friction=0.0, max_episode_steps=1000,
                  debris_min_speed=0.3, debris_max_speed=1.2,
-                 debris_speed_ramp_episodes=200, bounds_margin=5.0):
+                 debris_speed_ramp_episodes=200, bounds_margin=5.0,
+                 out_of_bounds_penalty=-100.0):
         super().__init__()
         self.size = size
         self.max_hazards = max_hazards
@@ -54,6 +55,7 @@ class SafeNav3DEnv(gym.Env):
         self.agent_friction = agent_friction
         self.max_episode_steps = max_episode_steps
         self.bounds_margin = bounds_margin
+        self.out_of_bounds_penalty = out_of_bounds_penalty
         self.debris_min_speed = debris_min_speed
         self.debris_max_speed = debris_max_speed
         self.debris_speed_ramp_episodes = debris_speed_ramp_episodes
@@ -216,12 +218,7 @@ class SafeNav3DEnv(gym.Env):
         return np.array(obs[:target_len], dtype=np.float32)
 
     def _out_of_bounds(self, pos):
-        """Has the agent drifted out of the play area by more than the margin?
-
-        Truncation rather than termination: leaving the field is a wandering
-        policy running out of useful state, the same category as hitting the
-        step cap, not a task failure with its own reward.
-        """
+        """Has the agent drifted out of the play area by more than the margin?"""
         lo, hi = -self.bounds_margin, self.size + self.bounds_margin
         return not all(lo <= float(pos[ax]) <= hi for ax in (0, 1))
 
@@ -264,7 +261,14 @@ class SafeNav3DEnv(gym.Env):
 
         # truncation is a backstop for a wandering policy, not the termination
         # path: goal/collision above still end the episode on their own.
-        truncated = (not done) and (self._step_count >= self.max_episode_steps
-                                    or self._out_of_bounds(obs[0:3]))
+        out_of_bounds = 0
+        if not done and self._out_of_bounds(obs[0:3]):
+            # Terminal task failure, not a time limit: the agent has left the
+            # region the task is defined over and cannot come back on its own.
+            reward += self.out_of_bounds_penalty
+            done = True
+            out_of_bounds = 1
 
-        return obs, reward, done, truncated, {"cost": cost}
+        truncated = (not done) and self._step_count >= self.max_episode_steps
+
+        return obs, reward, done, truncated, {"cost": cost, "out_of_bounds": out_of_bounds}

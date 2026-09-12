@@ -263,7 +263,7 @@ def run_episode(scn, shield, auditor, cfg_env, seed=0):
                                       float(np.linalg.norm(obs[0:3] - np.array(h))))
         if info.get("cost", 0) == 1:
             rec["collided"] = True
-            horizon = getattr(auditor, "lookahead_steps", 40)
+            horizon = getattr(auditor, "lookahead_steps", 20)
             if any(t - s <= horizon for s in flagged_steps):
                 rec["intervention_caused_collisions"] = 1
             break
@@ -274,10 +274,19 @@ def run_episode(scn, shield, auditor, cfg_env, seed=0):
     return rec
 
 
-def run_comparison(trials=25, cfg=None, lookahead_steps=40, safe_dist=2.2):
-    """Run every scenario under: no shield, old random shield, new shield."""
+def run_comparison(trials=25, cfg=None, lookahead_steps=None, safe_dist=None):
+    """Run every scenario under: no shield, old random shield, new shield.
+
+    lookahead_steps / safe_dist default to the config rather than to literals,
+    so the harness follows a physics change instead of quietly measuring the
+    previous tune.
+    """
     from saferl.config import load_config
     cfg = cfg or load_config()
+    if lookahead_steps is None:
+        lookahead_steps = cfg["shield"]["lookahead_steps"]
+    if safe_dist is None:
+        safe_dist = cfg["shield"]["safe_dist"]
     cfg_env = dict(cfg["env"])
     accel = cfg_env["force_mag"] / AGENT_MASS
     step_dt = cfg_env["sim_substeps"] / 240.0
@@ -341,8 +350,10 @@ def format_table(results):
 def main():
     ap = argparse.ArgumentParser(description="Old vs new shield on collision-course scenarios.")
     ap.add_argument("--trials", type=int, default=25)
-    ap.add_argument("--lookahead-steps", type=int, default=40)
-    ap.add_argument("--safe-dist", type=float, default=2.2)
+    ap.add_argument("--lookahead-steps", type=int, default=None,
+                help="default: config shield.lookahead_steps")
+    ap.add_argument("--safe-dist", type=float, default=None,
+                help="default: config shield.safe_dist")
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
 

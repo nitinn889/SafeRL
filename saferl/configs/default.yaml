@@ -28,6 +28,14 @@ env:
   # is dead training signal. Truncating (not terminating) keeps this a
   # bookkeeping backstop rather than a new reward term.
   bounds_margin: 5.0
+  # Leaving the field is task failure, so it terminates with a penalty rather
+  # than truncating for free. Measured necessity, not taste: with no penalty
+  # PPO converges to flying out of bounds in ~36 steps (0% goals, reward flat
+  # at -3.6) because -0.1/step makes any long episode worse than leaving. That
+  # degenerate optimum also starved the constrained layer -- lambda saturated
+  # at its ceiling and the intervention rate still rose. See the phase 6
+  # README sweep for how this value was chosen.
+  out_of_bounds_penalty: -100.0
   # debris drift speed in env units/sec; each hazard gets a random heading and
   # a speed sampled from this band, and bounces off the play-area boundary
   debris_min_speed: 0.3
@@ -65,13 +73,19 @@ training:
 
 # Soft (learned) safety layer: PPO is penalised for needing the shield.
 constrained:
-  # Budget on shield interventions per step. Baseline unconstrained PPO sits
-  # near 0.010, so this asks for roughly a 5x reduction.
-  target_rate: 0.002
-  # Dual-gradient step size on lambda, applied at episode boundaries.
-  lambda_lr: 2.0
+  # Budget on shield interventions per step. An unconstrained policy that
+  # actually stays in the field and engages the debris sits near 0.22, so this
+  # asks for roughly a 4x reduction. (The earlier 0.002 was calibrated against
+  # the degenerate escape policy, which only met it by leaving the field.)
+  target_rate: 0.05
+  # Dual-gradient step size on lambda, applied at episode boundaries. Sized
+  # against the reward scale: with ~145 interventions in a ~660-step episode,
+  # lambda ~ 0.7 already makes the penalty comparable to the +100 goal bonus,
+  # so the useful band is single digits and lambda_max caps it there. A large
+  # lr just saturates the multiplier and stops it carrying information.
+  lambda_lr: 0.1
   lambda_init: 0.0
-  lambda_max: 50.0
+  lambda_max: 5.0
   ema_beta: 0.9
 
 demo:

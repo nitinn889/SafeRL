@@ -172,7 +172,7 @@ def test_ppo_accepts_the_new_observation_space():
     from stable_baselines3.common.monitor import Monitor
 
     base = SafeNav3DEnv(size=10, max_hazards=5, curriculum=False, render_mode="direct")
-    shielded = ShieldedEnv(base, SafetyShield(safe_dist=2.2))
+    shielded = ShieldedEnv(base, SafetyShield())   # defaults follow the config
     model = PPO("MlpPolicy", Monitor(shielded, info_keywords=("cost",)),
                 n_steps=64, batch_size=32, verbose=0, device="cpu")
     model.learn(total_timesteps=64)
@@ -209,12 +209,12 @@ def test_no_curriculum_uses_full_speed_band():
 # ── phase 6: out-of-bounds backstop ──────────────────────────────────────
 
 
-def test_out_of_bounds_truncates_without_terminating(env):
-    """Drifting out of the play area ends the episode as a truncation.
+def test_out_of_bounds_terminates_with_a_penalty(env):
+    """Drifting out of the play area is terminal task failure, not a freebie.
 
     Nothing walls the agent in and there is no drag, so at the phase-6 thrust
-    a wandering policy reaches |xy| ~ 158 -- outside the observation space's
-    own bounds and far from anything the task is about.
+    a wandering policy reaches |xy| ~ 158. Leaving unpenalised, PPO converged
+    to flying out of bounds in ~36 steps and never attempted the task at all.
     """
     import pybullet as p
 
@@ -225,9 +225,18 @@ def test_out_of_bounds_truncates_without_terminating(env):
     )
     obs, reward, done, truncated, info = env.step(0)
 
-    assert truncated is True
-    assert done is False
-    assert info["cost"] == 0
+    assert done is True
+    assert truncated is False
+    assert info["out_of_bounds"] == 1
+    assert info["cost"] == 0           # leaving the field is not a collision
+    assert reward < env.out_of_bounds_penalty / 2
+
+
+def test_out_of_bounds_penalty_makes_leaving_no_better_than_staying(env):
+    """The penalty is derived, not fitted: it must at least match the cost of
+    burning a whole episode, or exiting early stays the better deal."""
+    worst_case_step_cost = 0.1 * env.max_episode_steps
+    assert abs(env.out_of_bounds_penalty) >= worst_case_step_cost
 
 
 def test_inside_the_margin_does_not_truncate(env):
@@ -243,6 +252,7 @@ def test_inside_the_margin_does_not_truncate(env):
     obs, reward, done, truncated, info = env.step(0)
 
     assert truncated is False
+    assert done is False
 
 
 def test_goal_termination_beats_the_bounds_check(env):
