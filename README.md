@@ -825,3 +825,259 @@ flows all the way through to the plot.
   it does is not fatal.
 - Training stays in PyBullet (~1036 fps measured again this phase, unchanged
   by the shield). UE remains rendering/demo only.
+
+---
+
+## Phase 6 (2026-09-12): Margin retune + constrained PPO (learned soft layer)
+
+Goal A loosened the physics so a policy has room to work inside the shield's
+margin. Goal B added the soft layer: PPO is now penalised for *needing* the
+shield, not just protected by it.
+
+### Goal A: margin retune
+
+**`force_mag` 12 N → 48 N** (1.2 → 4.8 m/s² against the agent's 10 kg).
+Dodging a hazard means displacing sideways by `hazard_threshold` (1.3) before
+it arrives, so `0.5·a·t² ≥ 1.3` gives the reaction time. That is `t ∝ 1/√a`,
+so **4× the thrust halves the clearing time**: 1.47 s (~36 steps) → **0.74 s
+(~18 steps)**, inside the 15–20 step target. Clearing the full 2.2-unit
+`safe_dist` rather than the collision radius takes 0.96 s (~23 steps); both
+numbers are quoted because phase 5's "~36 steps" was the 1.3 figure and the
+comparison should be like-for-like.
+
+**`lookahead_steps` 40 → 20.** The horizon is what bounds the shield's
+reachable set, `0.5·a·(H·dt)²`. At 4× thrust and half the horizon that set is
+`0.5·4.8·0.833² = 1.67` units — *exactly* what phase 5 had at `H=40` and
+1.2 m/s². So the shield sees the same distance ahead of itself while doing
+half the arithmetic per check. Verified by sweep rather than assumed
+(6 scenarios × 5 trials):
+
+| horizon H | collisions | fallback interventions |
+|---|---|---|
+| 8 | 5/30 | 181 |
+| 12 | 0/30 | 60 |
+| 16 | 0/30 | 60 |
+| **20 (chosen)** | **0/30** | **60** |
+| 24 / 28 / 40 | 0/30 | 60 |
+
+The empirical floor is H=12; H=20 keeps a margin and sits where intervention
+count plateaus (114 at H=20 vs 107 from H=24 on). All 60 remaining fallbacks
+come from `surrounded`, which is boxed-in by construction at every horizon.
+
+### Fresh stress baseline under the new physics
+
+Re-run, **not** carried over from phase 5 — these numbers describe the current
+config only (6 scenarios × 25 trials):
+
+| arm | collisions | preceded by a toward-hazard intervention |
+|---|---|---|
+| no shield | 150/150 | — |
+| old random-replacement shield | **146/150** | 135 |
+| new least-restrictive shield | **0/150** | 0 |
+
+The old shield got *worse* than phase 5's 128/150. That is the expected
+direction: more thrust means a wrong random dodge covers more ground, so the
+placeholder's failure mode is amplified by exactly the change that helps the
+real shield. The new shield stays at zero.
+
+**Three things the physics change broke, all found by measurement:**
+
+1. **The stress scenarios silently stopped testing anything.** They specified
+   encounters in *seconds*, so at 4× thrust every intercept point moved
+   outside the 10-unit play area — where debris reflect off the boundary and
+   leave their designed course. `pincer` degraded to 5/5 collisions with
+   *zero* interventions and would have been reported as a shield regression.
+   Encounters are now specified as **distance along the path** with the
+   harness solving for the time, and a guard raises if an encounter would land
+   outside the field, so this cannot pass quietly again.
+2. **`tests/test_shield.py` hardcoded `lookahead_steps=40` and
+   `safe_dist=2.2`**, combining the new thrust with the old horizon to give
+   the shield a 6.67-unit reachable set. One test failed and the rest were
+   passing for the wrong reason. Tests now read `configs/default.yaml`,
+   `SafetyShield`'s module defaults are *derived* from it rather than
+   restated, and `SafetyShield.from_config()` exists for non-default configs.
+   The same sweep found and fixed stale literals in `SafeNav3DEnv.__init__`,
+   `stress_test.run_comparison` and `test_env.py`.
+3. **The agent could leave the universe.** Nothing walls it in and there is no
+   drag, so at 4.8 m/s² a wandering policy reached `|xy| ≈ 158` within one
+   episode — outside the observation space's own ±20 bounds, with hundreds of
+   steps spent where the goal is unreachable and no hazard is in view. See
+   below; this turned out to matter far more than it first looked.
+
+### The degenerate escape, and why it had to be fixed first
+
+With leaving the field unpenalised, PPO found a much better idea than doing
+the task: **fly out of bounds as fast as possible.** Over 300k steps it
+converged by ~70k and sat there — 0% goals, 0% collisions, ~36-step episodes,
+task reward flat at −3.6. The arithmetic is not subtle:
+
+| behaviour | return |
+|---|---|
+| escape immediately (~36 steps) | **−3.6** |
+| wander in-field for a full episode | −100 |
+| reach the goal (~80 steps) | +92 |
+| crash | ≈ −50 |
+
+Escape dominates everything the policy had actually found, and the +92 the
+task offers is behind an exploration barrier. Worse, this **starved the soft
+layer of any signal**: over the same 300k steps the constrained arm's λ
+saturated at its ceiling of 50 and the intervention rate still went *up*
+(0.0110 → 0.0120). An agent beelining out of the field has almost no control
+over whether debris happen to sit on its exit path, so no multiplier, however
+large, can change its behaviour.
+
+**Fix: out-of-bounds terminates with a penalty.** The value is derived
+rather than fitted — **−100 equals a full episode's accumulated step cost**
+(`max_episode_steps × 0.1`), which is exactly the threshold above which
+leaving early stops being better than staying and trying. Swept at 120k steps
+to confirm the reasoning survives contact:
+
+| `out_of_bounds_penalty` | goal % | escape % | mean steps | intervention rate |
+|---|---|---|---|---|
+| 0 | 0.0 | 100.0 | 37 | 0.010 |
+| −25 | 40.7 | 50.0 | 460 | 0.244 |
+| −50 | 0.0 | 5.9 | 976 | 0.079 |
+| **−100 (chosen)** | **42.2** | **20.0** | 659 | 0.224 |
+
+−100 gives the best goal rate and the least escaping. −50 is a trap: the agent
+learns to hover in-field for the full 1000 steps and never commits.
+
+### Goal B: the cost signal and the Lagrangian layer
+
+**Cost signal.** `ShieldedEnv` now emits `info["shield_cost"]` — 1 on any step
+the shield intervened (substitution *or* fallback), 0 otherwise — plus
+`info["shield_fallback"]`. This is deliberately distinct from the env's
+existing collision `cost`: *needing the shield* is what the policy should
+learn to stop doing, *crashing* is what the shield exists to prevent.
+
+**The multiplier is real; its application is simplified.** Being precise about
+which half is which:
+
+- **Real:** λ is updated by a genuine dual-gradient ascent step on the
+  constraint violation, at episode boundaries:
+  `λ ← clip(λ + lr·(ema_rate − target_rate), 0, λ_max)`.
+  It rises while the policy exceeds its budget and decays once under. Not a
+  schedule, not a fixed penalty.
+- **Simplified:** λ is applied by **shaping the scalar reward**
+  (`r' = r − λ·cost`) and learned through PPO's single existing critic. A
+  textbook PPO-Lagrangian trains a **separate cost-value head** and forms the
+  policy gradient from both critics. This is the same dual variable with one
+  critic instead of two. The brief allowed either; this is the simpler one and
+  is labelled as such.
+
+The constraint is on intervention **rate**, not the episode total, because the
+out-of-bounds backstop makes episode length vary ~4×, and a per-episode budget
+would mostly reward ending episodes early.
+
+`enabled=False` pins λ at 0, so the unconstrained baseline runs through
+byte-identical plumbing and the comparison isn't confounded by a different
+code path.
+
+### CPU vs GPU: measured, and CPU won
+
+| device | 20k timesteps | throughput |
+|---|---|---|
+| **CPU (now the default)** | **23.89 s** | **837 fps** |
+| CUDA | 33.80 s | 592 fps |
+| *env + shield alone, no network* | *7.41 s* | *2700 fps* |
+
+Same seed, best of two reps each. **CPU is 1.41× faster.** A 64×64 `MlpPolicy`
+has nowhere near enough arithmetic per batch to amortise host↔device transfer.
+`training.device: cpu` is now the configured default.
+
+### Constrained-vs-unconstrained training results (400k steps)
+
+Both arms ran for 400k timesteps under identical physics, shield, and OOB
+penalty. The only difference is whether λ can rise above 0.
+
+**Unconstrained arm** (891 episodes):
+
+| decile (timestep) | task reward | intervention rate | ivs/episode | steps | goal % |
+|---|---|---|---|---|---|
+| 38k  | −109.9 | 0.041 |  23.6 | 436 |  10.1 |
+| 89k  |  −56.4 | 0.165 |  93.9 | 564 |  36.0 |
+| 192k |  −31.1 | 0.205 | 117.9 | 513 |  48.3 |
+| 268k |  +46.5 | 0.180 |  89.4 | 411 |  91.0 |
+| 401k |  +61.8 | 0.194 |  69.3 | 327 |  95.6 |
+
+The agent learned to reach the goal reliably (95.6% in the final decile) —
+the **first time in this project any policy has done so**. Task reward rose
+from −110 to +62. Intervention rate settled at ~19%, meaning on roughly 1 in 5
+steps the shield had to correct the agent's action. Zero collisions throughout.
+
+**Constrained arm** (509 episodes):
+
+| decile (timestep) | task reward | intervention rate | ivs/episode | steps | goal % | λ |
+|---|---|---|---|---|---|---|
+| 14k  | −107.3 | 0.024 |   7.5 | 273  | 10.0 | 0.000 |
+| 56k  | −110.2 | 0.066 |  52.5 | 827  |  2.0 | 0.013 |
+| 129k | −107.1 | 0.095 |  76.8 | 679  |  5.9 | 0.119 |
+| 213k | −117.8 | 0.048 |  40.9 | 864  |  0.0 | 0.504 |
+| 303k | −112.1 | 0.007 |   6.8 | 906  |  0.0 | 0.261 |
+| 401k | −100.9 | 0.015 |  14.5 | 990  |  0.0 | 0.000 |
+
+The constraint worked exactly as intended: intervention rate dropped from 4.6%
+to 1.5%, well below the 5% target. λ peaked at ~0.5, then decayed to 0 as the
+rate fell under the target. But the **cost was catastrophic**: goal rate
+collapsed to 0% in the last decile, task reward stayed at −101, and episode
+length ballooned to ~990 steps (nearly the 1000-step cap). The agent learned
+to be extremely cautious — it stopped triggering the shield by stopping doing
+anything at all.
+
+**Final-decile comparison:**
+
+| metric | unconstrained | constrained | delta |
+|---|---|---|---|
+| interventions/step | 0.194 | 0.015 | −92.5% |
+| interventions/episode | 69.3 | 14.5 | −79.0% |
+| task reward | +61.8 | −100.9 | −162.7 |
+| goal rate % | 95.6 | 0.0 | −95.6 pp |
+| collision rate % | 0.0 | 0.0 | +0.0 |
+| episode length | 327 | 990 | +663 |
+
+This is the classic safety-performance tradeoff with a simplified Lagrangian:
+a single critic cannot simultaneously track task value and cost value, so the
+policy converges to the constraint-satisfying fixed point closest to its
+initialisation — which is "do nothing" rather than "navigate efficiently while
+avoiding hazards." The dual variable did its job (rose while the rate was over
+budget, fell when it dropped below), but the policy did not have the
+representational or learning capacity to satisfy both objectives at once.
+
+### Sanity regression (30k steps, final config)
+
+Standard training pipeline under the final config confirms nothing is broken:
+87 episodes, 1339/30720 shield triggers (4.4% rate), 17 fallbacks, 0
+collisions. Reward and episode length profiles match pre-phase-6 expectations
+at this step count.
+
+### Test suite
+
+All 36 tests pass: 18 in `test_env.py` (including 4 new out-of-bounds tests)
+and 18 in `test_shield.py`. The 4 new tests verify OOB termination, penalty
+magnitude, margin tolerance, and goal-termination priority.
+
+### Open questions / what Phase 7 should assume
+
+1. **The safety-performance tradeoff is real and unsolved.** The single-critic
+   Lagrangian reduced interventions at the cost of all task performance. To fix
+   this, Phase 7 should consider:
+   - **Separate cost-value head** (the textbook PPO-Lagrangian): lets the
+     policy gradient balance task reward and cost penalty without one critic
+     trying to regress both signals.
+   - **Curriculum on the constraint**: start with a generous target rate (e.g.
+     0.30) and anneal toward 0.05, so the policy first learns *how* to reach
+     the goal, then learns to do so without the shield.
+   - **Reward shaping for near-miss avoidance**: the policy gets no credit for
+     dodging a hazard cleanly (phase 5 open question #5, still unanswered).
+     Shield-proximity reward could help the constrained policy find the
+     navigate-and-dodge behaviour rather than the do-nothing behaviour.
+2. **The unconstrained policy reaches goals at 95.6% — this is the project's
+   first working policy.** Phase 7 can use it as a performance baseline and a
+   warm-start for constrained fine-tuning, which would bypass the cold-start
+   exploration problem that trapped the constrained arm.
+3. **CPU is faster than GPU for this network size.** This will change if the
+   policy grows (larger network, attention, etc.) or if envs are vectorised.
+4. **`SafetyShield.from_config(cfg)` is the stable construction API.** New
+   code should use it rather than positional arguments.
+5. **The OOB penalty is load-bearing** — without it, neither arm learns
+   anything useful. It must be preserved in all future configs.
