@@ -1,0 +1,14 @@
+{
+  "purpose": "Reference point for reading the in-training convergence probes.",
+  "note": "Probes call evaluate_model(), which shares the protocol's episode loop but does not load the model inside the seeded region, so its numbers are NOT bit-comparable with evaluate(). This records what the same probe path reports for the *starting* checkpoint, so probe values during the run can be read against a like-for-like reference instead of against the authoritative figure.",
+  "checkpoint": "saferl/eval/phase7/saferl_phase7.zip",
+  "checkpoint_md5": "ed1449c76eaf6c40e390ffb6dc8d0c08",
+  "probe_protocol": {"n_episodes": 100, "seed": 42, "deterministic": true},
+  "probe_goal_rate": 0.820,
+  "probe_intervention_rate": 0.0919,
+  "authoritative_for_same_checkpoint": {
+    "source": "saferl/eval/phase8_reconciliation/phase7/eval_summary.csv",
+    "n_episodes": 500, "seed": 42, "deterministic": true,
+    "goal_rate": 0.892, "intervention_rate": 0.12566
+  }
+}

@@ -118,16 +118,30 @@ class Phase9Callback(BaseCallback):
 
 
 class ConvergenceCallback(BaseCallback):
-    """Probe held-out performance periodically; stop once it goes flat.
+    """Probe held-out performance periodically; stop once it stops improving.
 
-    Flat means: across the last `patience` probes, goal rate spans no more
-    than `goal_tol` and intervention rate spans no more than `iv_tol`. Both
-    have to settle -- a run whose goal rate is stable while lambda is still
-    driving the intervention rate down has not finished.
+    Two stopping conditions, either of which ends the run:
+
+    1. Plateau -- across the last `patience` probes, goal rate spans no more
+       than `goal_tol` and intervention rate spans no more than `iv_tol`.
+       Both have to settle; a run whose goal rate is stable while lambda is
+       still driving the intervention rate down has not finished.
+
+    2. No improvement -- the best probe goal rate has not improved for
+       `no_improve_patience` consecutive probes. Needed because condition 1
+       cannot fire while the policy oscillates, and this policy does
+       oscillate under a constraint target it cannot actually reach.
+
+    The probe seed is deliberately NOT the seed the final authoritative eval
+    uses. Probes both monitor convergence and select the best checkpoint, so
+    scoring them on the same episodes the final number is reported on would
+    be selecting on the test set and would inflate that number. Probes get
+    their own episode set; the reported figure comes from the untouched one.
     """
 
     def __init__(self, eval_every, eval_episodes, eval_seed, patience,
-                 goal_tol, iv_tol, out_dir, verbose=1):
+                 goal_tol, iv_tol, out_dir, no_improve_patience=6,
+                 best_ckpt_path=None, verbose=1):
         super().__init__(verbose)
         self.eval_every = eval_every
         self.eval_episodes = eval_episodes
@@ -135,10 +149,16 @@ class ConvergenceCallback(BaseCallback):
         self.patience = patience
         self.goal_tol = goal_tol
         self.iv_tol = iv_tol
+        self.no_improve_patience = no_improve_patience
+        self.best_ckpt_path = best_ckpt_path
         self.out_dir = Path(out_dir)
         self._next_eval = eval_every
         self.probes: list[dict] = []
         self.converged_at = None
+        self.stop_reason = None
+        self.best_goal = -1.0
+        self.best_probe = None
+        self._since_improve = 0
 
     def _on_step(self) -> bool:
         if self.num_timesteps < self._next_eval:
@@ -153,46 +173,75 @@ class ConvergenceCallback(BaseCallback):
             preserve_rng=True,
         )
         gr, ivr = result["goal_rate"], result["intervention_rate"]
+
+        improved = gr > self.best_goal
+        if improved:
+            self.best_goal = gr
+            self._since_improve = 0
+            if self.best_ckpt_path is not None:
+                self.model.save(self.best_ckpt_path)
+            self.best_probe = dict(
+                timestep=int(self.num_timesteps),
+                goal_rate=gr, intervention_rate=ivr,
+                collisions=result["collisions"],
+            )
+        else:
+            self._since_improve += 1
+
         self.probes.append(dict(
             timestep=int(self.num_timesteps),
             goal_rate=gr,
             intervention_rate=ivr,
             collisions=result["collisions"],
             lam=round(float(getattr(self.model, "lam", 0.0)), 4),
+            is_best=int(improved),
         ))
 
         self.logger.record("eval/goal_rate", gr)
         self.logger.record("eval/intervention_rate", ivr)
         self.logger.record("eval/collisions", result["collisions"])
+        self.logger.record("eval/best_goal_rate", self.best_goal)
         self.logger.dump(self.num_timesteps)
 
         if self.verbose:
             print(f"[probe @ {self.num_timesteps}] goal={gr*100:.1f}%  "
                   f"iv={ivr*100:.2f}%  collisions={result['collisions']}  "
-                  f"lambda={getattr(self.model, 'lam', 0.0):.3f}")
+                  f"lambda={getattr(self.model, 'lam', 0.0):.3f}"
+                  f"{'  <- best' if improved else ''}")
 
         return self._check_converged()
 
     def _check_converged(self) -> bool:
-        if len(self.probes) < self.patience:
-            return True
-        window = self.probes[-self.patience:]
-        goals = [p["goal_rate"] for p in window]
-        ivs = [p["intervention_rate"] for p in window]
-        goal_span = max(goals) - min(goals)
-        iv_span = max(ivs) - min(ivs)
+        if len(self.probes) >= self.patience:
+            window = self.probes[-self.patience:]
+            goals = [p["goal_rate"] for p in window]
+            ivs = [p["intervention_rate"] for p in window]
+            goal_span = max(goals) - min(goals)
+            iv_span = max(ivs) - min(ivs)
 
-        if self.verbose:
-            print(f"    convergence window (last {self.patience} probes): "
-                  f"goal span {goal_span*100:.2f}pp (tol {self.goal_tol*100:.2f}), "
-                  f"iv span {iv_span*100:.2f}pp (tol {self.iv_tol*100:.2f})")
+            if self.verbose:
+                print(f"    plateau check (last {self.patience}): goal span "
+                      f"{goal_span*100:.1f}pp (tol {self.goal_tol*100:.1f}), "
+                      f"iv span {iv_span*100:.2f}pp (tol {self.iv_tol*100:.2f}); "
+                      f"no-improve {self._since_improve}/{self.no_improve_patience}")
 
-        if goal_span <= self.goal_tol and iv_span <= self.iv_tol:
+            if goal_span <= self.goal_tol and iv_span <= self.iv_tol:
+                self.converged_at = int(self.num_timesteps)
+                self.stop_reason = (
+                    f"plateau: goal and intervention rate both flat across "
+                    f"{self.patience} consecutive probes")
+                print(f"\nSTOPPING at {self.converged_at} steps -- {self.stop_reason}")
+                return False
+
+        if self._since_improve >= self.no_improve_patience:
             self.converged_at = int(self.num_timesteps)
-            print(f"\nCONVERGED at {self.converged_at} steps: goal rate and "
-                  f"intervention rate both flat across {self.patience} "
-                  f"consecutive probes.")
+            self.stop_reason = (
+                f"no improvement: best probe goal rate "
+                f"({self.best_goal*100:.1f}%) not beaten for "
+                f"{self._since_improve} consecutive probes")
+            print(f"\nSTOPPING at {self.converged_at} steps -- {self.stop_reason}")
             return False
+
         return True
 
     def write_probes(self):
@@ -310,13 +359,20 @@ def main():
     ap.add_argument("--target-rate", type=float, default=0.05)
     ap.add_argument("--eval-every", type=int, default=50_000)
     ap.add_argument("--eval-episodes", type=int, default=100)
-    ap.add_argument("--eval-seed", type=int, default=42)
+    ap.add_argument("--eval-seed", type=int, default=7,
+                    help="Probe/selection seed. Deliberately NOT the final "
+                         "eval's seed (42) -- probes pick the best checkpoint, "
+                         "so scoring them on the reported episodes would be "
+                         "selecting on the test set.")
     ap.add_argument("--patience", type=int, default=4,
-                    help="Consecutive flat probes required to declare convergence")
-    ap.add_argument("--goal-tol", type=float, default=0.02,
+                    help="Consecutive flat probes required to declare a plateau")
+    ap.add_argument("--goal-tol", type=float, default=0.04,
                     help="Max goal-rate span across the window (fraction)")
-    ap.add_argument("--iv-tol", type=float, default=0.015,
+    ap.add_argument("--iv-tol", type=float, default=0.02,
                     help="Max intervention-rate span across the window (fraction)")
+    ap.add_argument("--no-improve-patience", type=int, default=6,
+                    help="Stop if the best probe goal rate is not beaten for "
+                         "this many consecutive probes")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -359,6 +415,8 @@ def main():
         patience=args.patience,
         goal_tol=args.goal_tol,
         iv_tol=args.iv_tol,
+        no_improve_patience=args.no_improve_patience,
+        best_ckpt_path=str(out / "saferl_phase9_best.zip"),
         out_dir=out,
     )
 
@@ -376,13 +434,18 @@ def main():
     model.save(out / "saferl_phase9.zip")
 
     s = summarise("phase9", ep_cb.rows)
-    s["converged_at"] = conv_cb.converged_at or "not converged (hit ceiling)"
+    s["stopped_at"] = conv_cb.converged_at or "hit ceiling"
+    s["stop_reason"] = conv_cb.stop_reason or "max-timesteps ceiling reached"
+    s["best_probe_goal_rate"] = conv_cb.best_goal
+    s["best_probe_timestep"] = (conv_cb.best_probe or {}).get("timestep", "n/a")
     print(f"\n[phase9] episodes={s['episodes']} goals={s['goals']} "
           f"({s['goal_rate_pct']}%) collisions={s['collisions']} "
           f"rate {s['last_rate']:.4f} "
           f"task_reward {s['last_task_reward']:.1f} "
-          f"lambda={s['final_lambda']} "
-          f"converged_at={s['converged_at']}")
+          f"lambda={s['final_lambda']}")
+    print(f"[phase9] stopped at {s['stopped_at']} -- {s['stop_reason']}")
+    print(f"[phase9] best probe {conv_cb.best_goal*100:.1f}% goal at step "
+          f"{s['best_probe_timestep']} -> saferl_phase9_best.zip")
 
     with open(out / "summary.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(s.keys()))

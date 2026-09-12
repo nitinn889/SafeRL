@@ -1,0 +1,5 @@
+[probe @ 50000] goal=47.0%  iv=6.53%  collisions=0  lambda=1.789
+[probe @ 100000] goal=75.0%  iv=7.01%  collisions=0  lambda=1.877
+[probe @ 150000] goal=60.0%  iv=6.38%  collisions=0  lambda=1.940
+[probe @ 200000] goal=87.0%  iv=9.67%  collisions=0  lambda=1.998
+[probe @ 250000] goal=73.0%  iv=5.95%  collisions=0  lambda=2.079
