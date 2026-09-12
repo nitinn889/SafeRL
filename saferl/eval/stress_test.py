@@ -29,14 +29,19 @@ HAZARD_Z = 0.5        # env default spawn height for debris
 
 @dataclass
 class HazardSpec:
-    """A hazard defined by *where and when it meets the agent*.
+    """A hazard defined by *where along the path it meets the agent*.
 
-    `intercept_t` seconds after the start, arriving from direction
-    `approach_from` (a unit-ish vector pointing from the hazard toward the
-    intercept point is its negation) at `speed` units/sec. speed=0 gives a
-    stationary obstacle parked on the path.
+    The encounter is specified as `intercept_distance` units travelled along
+    the agent's un-shielded path, NOT as a time. Phase 6 changed force_mag
+    from 12N to 48N and every time-specified encounter silently moved outside
+    the 10-unit play area, where boundary reflection destroyed the designed
+    trajectory and the scenario quietly stopped testing anything. Distance
+    along the path is invariant to thrust; the harness solves for the time.
+
+    The hazard arrives from direction `approach_from` at `speed` units/sec;
+    speed=0 parks a stationary obstacle on the path.
     """
-    intercept_t: float
+    intercept_distance: float
     approach_from: tuple      # side the hazard comes from, e.g. (0, -1, 0) = below
     speed: float
     offset: tuple = (0.0, 0.0, 0.0)
@@ -64,6 +69,25 @@ def _agent_position_at(scn, t, accel):
     return p0 + v0 * t + 0.5 * a * t * t
 
 
+def _time_to_travel(scn, distance, accel):
+    """When the un-shielded agent has covered `distance` along its intent axis.
+
+    Solves 0.5*a*t^2 + v*t - distance = 0 for the positive root, where v is
+    the agent's initial speed along that axis. This is what makes a scenario
+    survive a change in force_mag: the geometry is pinned in the play area and
+    the timing falls out of the physics.
+    """
+    if distance <= 0:
+        return 0.0
+    u = ACTION_THRUST_DIRS[scn.intent_action]
+    v = float(np.dot(np.array(scn.agent_vel, dtype=np.float64), u))
+    if accel <= 0:
+        if v <= 0:
+            raise ValueError(f"{scn.name}: agent never covers {distance} units")
+        return distance / v
+    return float((-v + np.sqrt(v * v + 2.0 * accel * distance)) / accel)
+
+
 def build_scenarios():
     """Five encounters, chosen to separate distance-only from velocity-aware.
 
@@ -79,14 +103,14 @@ def build_scenarios():
             description="debris drifting straight back down the agent's +X path",
             agent_pos=(1.0, 5.0, AGENT_REST_Z), agent_vel=(1.0, 0.0, 0.0),
             intent_action=3,
-            hazards=[HazardSpec(intercept_t=2.0, approach_from=(1, 0, 0), speed=1.2)],
+            hazards=[HazardSpec(intercept_distance=5.0, approach_from=(1, 0, 0), speed=1.2)],
         ),
         Scenario(
             name="crossing_from_right",
             description="debris cutting across the path from +Y, perpendicular",
             agent_pos=(1.0, 5.0, AGENT_REST_Z), agent_vel=(1.0, 0.0, 0.0),
             intent_action=3,
-            hazards=[HazardSpec(intercept_t=2.0, approach_from=(0, 1, 0), speed=1.2)],
+            hazards=[HazardSpec(intercept_distance=5.0, approach_from=(0, 1, 0), speed=1.2)],
         ),
         Scenario(
             name="crossing_from_left",
@@ -94,7 +118,7 @@ def build_scenarios():
                         "always dodges the same way",
             agent_pos=(1.0, 5.0, AGENT_REST_Z), agent_vel=(1.0, 0.0, 0.0),
             intent_action=3,
-            hazards=[HazardSpec(intercept_t=2.0, approach_from=(0, -1, 0), speed=1.2)],
+            hazards=[HazardSpec(intercept_distance=5.0, approach_from=(0, -1, 0), speed=1.2)],
         ),
         Scenario(
             name="parked_obstacle",
@@ -102,7 +126,7 @@ def build_scenarios():
                         "the distance-only trigger also sees",
             agent_pos=(1.0, 5.0, AGENT_REST_Z), agent_vel=(1.0, 0.0, 0.0),
             intent_action=3,
-            hazards=[HazardSpec(intercept_t=2.2, approach_from=(1, 0, 0), speed=0.0)],
+            hazards=[HazardSpec(intercept_distance=5.5, approach_from=(1, 0, 0), speed=0.0)],
         ),
         Scenario(
             name="surrounded",
@@ -112,7 +136,7 @@ def build_scenarios():
                         "'buy time', not 'give up'.",
             agent_pos=(5.0, 5.0, AGENT_REST_Z), agent_vel=(0.0, 0.0, 0.0),
             intent_action=3,
-            hazards=[HazardSpec(intercept_t=0.0, approach_from=d, speed=0.0,
+            hazards=[HazardSpec(intercept_distance=0.0, approach_from=d, speed=0.0,
                                 offset=tuple(2.0 * np.array(d, dtype=float)))
                      for d in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0))],
             steps=60,
@@ -124,9 +148,9 @@ def build_scenarios():
             agent_pos=(1.0, 5.0, AGENT_REST_Z), agent_vel=(1.0, 0.0, 0.0),
             intent_action=3,
             hazards=[
-                HazardSpec(intercept_t=2.0, approach_from=(0, 1, 0), speed=1.4),
-                HazardSpec(intercept_t=2.0, approach_from=(0, -1, 0), speed=1.4),
-                HazardSpec(intercept_t=2.4, approach_from=(1, 0, 0), speed=1.0),
+                HazardSpec(intercept_distance=5.0, approach_from=(0, 1, 0), speed=1.4),
+                HazardSpec(intercept_distance=5.0, approach_from=(0, -1, 0), speed=1.4),
+                HazardSpec(intercept_distance=6.5, approach_from=(1, 0, 0), speed=1.0),
             ],
         ),
     ]
@@ -141,16 +165,35 @@ def _place(env, scn, accel):
                         angularVelocity=[0, 0, 0], physicsClientId=cid)
 
     for i, spec in enumerate(scn.hazards):
-        meet = _agent_position_at(scn, spec.intercept_t, accel)
+        t_meet = _time_to_travel(scn, spec.intercept_distance, accel)
+        meet = _agent_position_at(scn, t_meet, accel)
         u = np.array(spec.approach_from, dtype=np.float64)
         u = u / (np.linalg.norm(u) or 1.0)
         vel = -u * spec.speed                       # travels toward the meeting point
-        start = meet - vel * spec.intercept_t + np.array(spec.offset, dtype=np.float64)
+        start = meet - vel * t_meet + np.array(spec.offset, dtype=np.float64)
+        _assert_in_play_area(scn, env.size, meet, start)
         h_pos = [float(start[0]), float(start[1]), HAZARD_Z]
         env.hazard_positions[i] = h_pos
         env.hazard_velocities[i] = [float(vel[0]), float(vel[1]), 0.0]
         p.resetBasePositionAndOrientation(env._hazard_ids[i], h_pos,
                                           [0, 0, 0, 1], physicsClientId=cid)
+
+
+def _assert_in_play_area(scn, size, meet, start):
+    """Fail loudly if a scenario places its encounter outside the field.
+
+    Debris reflect off the [0, size] boundary, so a hazard placed outside it
+    is immediately bounced off its designed course and the scenario silently
+    degrades into noise. Phase 6 hit exactly that, so it is now an error
+    rather than a quietly passing test.
+    """
+    for label, pt in (("intercept point", meet), ("hazard start", start)):
+        if not all(0.0 <= float(pt[ax]) <= size for ax in (0, 1)):
+            raise ValueError(
+                f"scenario {scn.name!r}: {label} {np.round(pt[:2], 2).tolist()} "
+                f"is outside the 0..{size} play area -- retune "
+                f"intercept_distance for the current force_mag"
+            )
 
 
 def _toward_hazard(obs, executed_action, hazard_index):

@@ -204,3 +204,57 @@ def test_no_curriculum_uses_full_speed_band():
                        render_mode="direct")
     assert env._debris_speed_range() == (0.3, 1.2)
     env.close()
+
+
+# ── phase 6: out-of-bounds backstop ──────────────────────────────────────
+
+
+def test_out_of_bounds_truncates_without_terminating(env):
+    """Drifting out of the play area ends the episode as a truncation.
+
+    Nothing walls the agent in and there is no drag, so at the phase-6 thrust
+    a wandering policy reaches |xy| ~ 158 -- outside the observation space's
+    own bounds and far from anything the task is about.
+    """
+    import pybullet as p
+
+    env.reset()
+    far = env.size + env.bounds_margin + 1.0
+    p.resetBasePositionAndOrientation(
+        env.agent_id, [far, 0.5, 0.25], [0, 0, 0, 1], physicsClientId=env._client,
+    )
+    obs, reward, done, truncated, info = env.step(0)
+
+    assert truncated is True
+    assert done is False
+    assert info["cost"] == 0
+
+
+def test_inside_the_margin_does_not_truncate(env):
+    """The margin is slack, not a wall: just outside the field is still fine."""
+    import pybullet as p
+
+    env.reset()
+    just_outside = env.size + env.bounds_margin - 1.0
+    p.resetBasePositionAndOrientation(
+        env.agent_id, [just_outside, 0.5, 0.25], [0, 0, 0, 1],
+        physicsClientId=env._client,
+    )
+    obs, reward, done, truncated, info = env.step(0)
+
+    assert truncated is False
+
+
+def test_goal_termination_beats_the_bounds_check(env):
+    """An in-bounds goal must still terminate rather than being masked."""
+    import pybullet as p
+
+    env.reset()
+    p.resetBasePositionAndOrientation(
+        env.agent_id, env.goal_pos.tolist(), [0, 0, 0, 1],
+        physicsClientId=env._client,
+    )
+    obs, reward, done, truncated, info = env.step(0)
+
+    assert done is True
+    assert truncated is False

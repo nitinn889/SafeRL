@@ -11,11 +11,19 @@ from saferl.env.base_env import (
     ACTION_THRUST_DIRS, AGENT_MASS, OBS_HEADER_LEN, OBS_PER_HAZARD,
     PHYSICS_HZ, SafeNav3DEnv,
 )
+from saferl.config import load_config
 from saferl.shield.safety_shield import (
     RandomReplacementShield, SafetyShield, ShieldedEnv,
 )
 
-SAFE_DIST = 2.2
+# Read from configs/default.yaml rather than restated. Phase 6 raised
+# force_mag 12 -> 48 and halved the horizon; a fixture that hardcoded
+# lookahead_steps=40 combined the new thrust with the old horizon and gave
+# the shield a 6.67-unit reachable set instead of 1.67, which broke geometry
+# these tests depend on. The defaults now follow the config by construction.
+CFG = load_config()
+SAFE_DIST = CFG["shield"]["safe_dist"]
+LOOKAHEAD_STEPS = CFG["shield"]["lookahead_steps"]
 AGENT_Z = 0.25       # where the agent rests on the plane
 HAZARD_Z = 0.5       # env default debris height
 
@@ -40,7 +48,7 @@ def make_obs(agent_pos, agent_vel=(0.0, 0.0, 0.0), hazards=(), max_hazards=5):
 
 @pytest.fixture
 def shield():
-    return SafetyShield(safe_dist=SAFE_DIST, lookahead_steps=40)
+    return SafetyShield.from_config(CFG)
 
 
 # ── Goal C case 1: the trigger must be driven by relative velocity ──────────
@@ -79,7 +87,7 @@ def test_old_distance_only_shield_misses_the_closing_hazard():
                    hazards=[((5.0, 10.0, HAZARD_Z), (0.0, -3.0, 0.0))])
 
     _, old_intervened = RandomReplacementShield(safe_dist=SAFE_DIST).check_and_fix(obs, 0)
-    _, new_intervened = SafetyShield(safe_dist=SAFE_DIST).check_and_fix(obs, 0)
+    _, new_intervened = SafetyShield.from_config(CFG).check_and_fix(obs, 0)
 
     assert old_intervened is False
     assert new_intervened is True
@@ -141,9 +149,10 @@ def test_boxed_in_falls_back_to_the_action_that_buys_the_most_time(shield):
     """Hazards closing from +Y fast and -Y slowly, with no clear flank: no
     action holds safe_dist, so the shield must maximise time-to-violation.
 
-    Fleeing -Y delays the breach to ~0.375s; taking the proposed +Y breaches
-    at ~0.333s and either sideways dodge at ~0.333s, so -Y is the unique
-    best. The shield must pick it and label the decision a fallback.
+    Under the phase-6 physics (a = 4.8 m/s^2, H = 20 steps) fleeing -Y delays
+    the breach to 0.417s, against 0.333s for either sideways dodge and 0.292s
+    for the proposed +Y -- so -Y is the unique best. The shield must pick it
+    and label the decision a fallback.
     """
     obs = make_obs((5.0, 5.0, AGENT_Z), hazards=[
         ((5.0, 8.0, HAZARD_Z), (0.0, -2.5, 0.0)),
@@ -218,7 +227,7 @@ def test_shield_intervenes_near_hazard():
     obs = make_obs((1.0, 1.0, AGENT_Z),
                    hazards=[((1.5, 1.0, HAZARD_Z), (0.0, 0.0, 0.0))])
 
-    action, intervened = SafetyShield(safe_dist=SAFE_DIST).check_and_fix(obs, action=0)
+    action, intervened = SafetyShield.from_config(CFG).check_and_fix(obs, action=0)
     assert intervened is True
     assert action in (0, 1, 2, 3)
 
@@ -227,14 +236,14 @@ def test_shield_does_not_intervene_when_clear():
     obs = make_obs((1.0, 1.0, AGENT_Z),
                    hazards=[((15.0, 15.0, HAZARD_Z), (0.0, 0.0, 0.0))])
 
-    action, intervened = SafetyShield(safe_dist=SAFE_DIST).check_and_fix(obs, action=2)
+    action, intervened = SafetyShield.from_config(CFG).check_and_fix(obs, action=2)
     assert intervened is False
     assert action == 2
 
 
 def test_shielded_env_tracks_last_obs_without_reaching_into_env():
     base = SafeNav3DEnv(size=10, max_hazards=5, curriculum=False, render_mode="direct")
-    shielded = ShieldedEnv(base, SafetyShield(safe_dist=SAFE_DIST))
+    shielded = ShieldedEnv(base, SafetyShield.from_config(CFG))
     obs, _ = shielded.reset()
     assert shielded._last_obs is not None
     np.testing.assert_array_equal(obs, shielded._last_obs)
@@ -295,7 +304,7 @@ def test_shielded_env_counts_fallbacks_separately():
     """ShieldedEnv must read the kind of intervention, not just that one
     happened -- otherwise phase 9 cannot tell the two cases apart."""
     base = SafeNav3DEnv(size=10, max_hazards=4, curriculum=False, render_mode="direct")
-    shield = SafetyShield(safe_dist=SAFE_DIST)
+    shield = SafetyShield.from_config(CFG)
     shielded = ShieldedEnv(base, shield)
     shielded.reset()
 

@@ -41,7 +41,7 @@ class SafeNav3DEnv(gym.Env):
                  force_mag=12.0, goal_threshold=1.0, hazard_threshold=1.3,
                  sim_substeps=10, agent_friction=0.0, max_episode_steps=1000,
                  debris_min_speed=0.3, debris_max_speed=1.2,
-                 debris_speed_ramp_episodes=200):
+                 debris_speed_ramp_episodes=200, bounds_margin=5.0):
         super().__init__()
         self.size = size
         self.max_hazards = max_hazards
@@ -53,6 +53,7 @@ class SafeNav3DEnv(gym.Env):
         self.sim_substeps = sim_substeps
         self.agent_friction = agent_friction
         self.max_episode_steps = max_episode_steps
+        self.bounds_margin = bounds_margin
         self.debris_min_speed = debris_min_speed
         self.debris_max_speed = debris_max_speed
         self.debris_speed_ramp_episodes = debris_speed_ramp_episodes
@@ -214,6 +215,16 @@ class SafeNav3DEnv(gym.Env):
             obs.extend([0.0] * OBS_PER_HAZARD)
         return np.array(obs[:target_len], dtype=np.float32)
 
+    def _out_of_bounds(self, pos):
+        """Has the agent drifted out of the play area by more than the margin?
+
+        Truncation rather than termination: leaving the field is a wandering
+        policy running out of useful state, the same category as hitting the
+        step cap, not a task failure with its own reward.
+        """
+        lo, hi = -self.bounds_margin, self.size + self.bounds_margin
+        return not all(lo <= float(pos[ax]) <= hi for ax in (0, 1))
+
     def step(self, action):
         cid = self._client
         force = (ACTION_THRUST_DIRS[int(action)] * self.force_mag).tolist()
@@ -253,6 +264,7 @@ class SafeNav3DEnv(gym.Env):
 
         # truncation is a backstop for a wandering policy, not the termination
         # path: goal/collision above still end the episode on their own.
-        truncated = (not done) and self._step_count >= self.max_episode_steps
+        truncated = (not done) and (self._step_count >= self.max_episode_steps
+                                    or self._out_of_bounds(obs[0:3]))
 
         return obs, reward, done, truncated, {"cost": cost}

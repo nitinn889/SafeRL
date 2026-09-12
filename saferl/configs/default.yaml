@@ -3,7 +3,12 @@ env:
   size: 10
   max_hazards: 5
   curriculum: true
-  force_mag: 12.0
+  # Thrust in newtons against the agent's 10kg mass, i.e. 4.8 m/s^2 of control
+  # authority. Raised 4x from 12.0 in phase 6: clearing time scales as
+  # 1/sqrt(a), so 4x thrust halves the time to dodge a hazard (see the
+  # lookahead_steps note below). Phase 6 needed that margin so the policy has
+  # room to anticipate the shield instead of being permanently at its trigger.
+  force_mag: 48.0
   goal_threshold: 1.0
   hazard_threshold: 1.3
   # physics substeps per env step: thrust is held across all of them, so the
@@ -15,6 +20,14 @@ env:
   agent_friction: 0.0
   # backstop for a wandering policy; goal/collision termination is unaffected
   max_episode_steps: 1000
+  # How far outside the [0, size] play area the agent may drift before the
+  # episode is truncated. There is no drag and nothing walls the agent in, so
+  # at 4.8 m/s^2 a wandering policy reaches |xy| ~ 158 within one episode --
+  # far outside the observation space's own +/-20 bounds, and hundreds of
+  # steps spent where the goal is unreachable and no hazard is in view. That
+  # is dead training signal. Truncating (not terminating) keeps this a
+  # bookkeeping backstop rather than a new reward term.
+  bounds_margin: 5.0
   # debris drift speed in env units/sec; each hazard gets a random heading and
   # a speed sampled from this band, and bounces off the play-area boundary
   debris_min_speed: 0.3
@@ -25,14 +38,17 @@ env:
 
 shield:
   safe_dist: 2.2
-  # Lookahead horizon in env steps (1 step = sim_substeps/240 s, so 40 ~ 1.67s).
-  # Calibrated against the agent's control authority, not guessed: clearing a
-  # 2.2-unit safe radius sideways from rest needs 0.5*a*t^2 >= ~1.3 at
-  # a = force_mag/mass = 1.2 m/s^2, i.e. t >= ~1.5s ~ 36 steps. A shorter
-  # horizon sees the threat only after it is already unavoidable -- measured:
-  # at 20 steps the head-on stress scenario still collides 3/3 and every
-  # intervention is a boxed-in fallback; at 30+ it is 0/3 with no fallbacks.
-  lookahead_steps: 40
+  # Lookahead horizon in env steps (1 step = sim_substeps/240 s, so 20 ~ 0.83s).
+  # Calibrated against control authority, not guessed. Dodging a hazard means
+  # displacing sideways by hazard_threshold (1.3) before it arrives:
+  # 0.5*a*t^2 >= 1.3 at a = force_mag/mass = 4.8 m/s^2 gives t >= 0.74s
+  # (~18 steps), down from ~36 steps at the old 12N thrust.
+  # The horizon is what bounds the shield's reachable set, and that set is
+  # 0.5*a*(H*dt)^2 -- so 4x the thrust at half the horizon is the *same*
+  # 1.67 units of lateral reach phase 5 had at H=40. Halving it costs no
+  # safety and halves the per-check compute. Verified by sweep, not assumed:
+  # see the phase 6 README table (H=12 collides, H>=16 does not).
+  lookahead_steps: 20
 
 training:
   timesteps: 30000

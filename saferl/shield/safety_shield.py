@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 import gymnasium as gym
 
+from saferl.config import load_config
 from saferl.env.base_env import (
     ACTION_THRUST_DIRS,
     AGENT_MASS,
@@ -28,10 +29,16 @@ from saferl.env.base_env import (
     PHYSICS_HZ,
 )
 
-# Defaults matching saferl/configs/default.yaml's env block, so a bare
-# SafetyShield() still models the default environment correctly.
-DEFAULT_ACCEL = 12.0 / AGENT_MASS          # force_mag / mass  = 1.2 m/s^2
-DEFAULT_STEP_DT = 10 / PHYSICS_HZ          # sim_substeps / physics rate
+# Derived from configs/default.yaml rather than restated here. A shield whose
+# motion model disagrees with the env it guards is confidently wrong, and
+# phase 6's force_mag change is exactly the kind of edit that would have left
+# a hardcoded copy stale. Callers with a non-default config should use
+# SafetyShield.from_config().
+_DEFAULTS = load_config()
+DEFAULT_ACCEL = _DEFAULTS["env"]["force_mag"] / AGENT_MASS
+DEFAULT_STEP_DT = _DEFAULTS["env"]["sim_substeps"] / PHYSICS_HZ
+DEFAULT_SAFE_DIST = _DEFAULTS["shield"]["safe_dist"]
+DEFAULT_LOOKAHEAD_STEPS = _DEFAULTS["shield"]["lookahead_steps"]
 
 
 @dataclass
@@ -74,7 +81,8 @@ class SafetyShield:
         agent and hazard is kept, so the separation stays a true 3D distance.
     """
 
-    def __init__(self, safe_dist=2.2, lookahead_steps=40,
+    def __init__(self, safe_dist=DEFAULT_SAFE_DIST,
+                 lookahead_steps=DEFAULT_LOOKAHEAD_STEPS,
                  accel=DEFAULT_ACCEL, step_dt=DEFAULT_STEP_DT,
                  keep_log=False, log_limit=10000):
         self.safe_dist = safe_dist
@@ -99,6 +107,18 @@ class SafetyShield:
         self.log_limit = log_limit
         self.log = []
         self.last_decision = None
+
+    @classmethod
+    def from_config(cls, cfg, **overrides):
+        """Build a shield whose motion model matches `cfg`'s environment."""
+        kwargs = dict(
+            safe_dist=cfg["shield"]["safe_dist"],
+            lookahead_steps=cfg["shield"]["lookahead_steps"],
+            accel=cfg["env"]["force_mag"] / AGENT_MASS,
+            step_dt=cfg["env"]["sim_substeps"] / PHYSICS_HZ,
+        )
+        kwargs.update(overrides)
+        return cls(**kwargs)
 
     # ------ observation decoding ------
     def _hazards(self, obs):
@@ -269,7 +289,7 @@ class RandomReplacementShield:
     on that failure mode. Not used in training.
     """
 
-    def __init__(self, safe_dist=2.2, rng=None):
+    def __init__(self, safe_dist=DEFAULT_SAFE_DIST, rng=None):
         self.safe_dist = safe_dist
         self.rng = rng if rng is not None else np.random
         self.n_checks = 0

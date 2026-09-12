@@ -10,7 +10,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from saferl.config import load_config
-from saferl.env.base_env import AGENT_MASS, PHYSICS_HZ, SafeNav3DEnv
+from saferl.env.base_env import SafeNav3DEnv
 from saferl.shield.safety_shield import SafetyShield, ShieldedEnv
 from saferl.training.metrics import MetricsCallback
 
@@ -24,12 +24,7 @@ def make_env(cfg):
         # The shield's motion model has to match the env it is guarding, so
         # derive its dynamics from the same config rather than trusting the
         # module defaults to stay in step with it.
-        shield = SafetyShield(
-            safe_dist=cfg["shield"]["safe_dist"],
-            lookahead_steps=cfg["shield"].get("lookahead_steps", 40),
-            accel=cfg["env"]["force_mag"] / AGENT_MASS,
-            step_dt=cfg["env"]["sim_substeps"] / PHYSICS_HZ,
-        )
+        shield = SafetyShield.from_config(cfg)
         shielded = ShieldedEnv(base, shield)
         return Monitor(shielded, info_keywords=("cost",))
     return _factory
