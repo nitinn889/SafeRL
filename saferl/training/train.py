@@ -65,7 +65,8 @@ def plot_metrics(cb, output_path):
 
 def train(config_path=None, model_out="saferl_model.zip"):
     cfg = load_config(config_path)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # CPU by default and on purpose -- see the note in configs/default.yaml.
+    device = cfg["training"].get("device", "cpu")
     print(f"Using device: {device}")
 
     v_env = DummyVecEnv([make_env(cfg)])

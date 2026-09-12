@@ -52,10 +52,27 @@ shield:
 
 training:
   timesteps: 30000
+  # Measured, not assumed: CPU runs this workload at 837 fps against CUDA's
+  # 592 on an RTX 5060 Laptop (8.1GB). The env alone runs at 2700 fps, so most
+  # of the wall clock is the network -- and a 64x64 MlpPolicy is far too small
+  # for the GPU to earn back its per-batch host<->device transfer. Re-measure
+  # with saferl/eval/phase6/device_bench if the policy ever gets big.
+  device: cpu
   algo: PPO
   policy: MlpPolicy
   verbose: 1
   output_plot: saferl_metrics.png
+
+# Soft (learned) safety layer: PPO is penalised for needing the shield.
+constrained:
+  # Budget on shield interventions per step. Baseline unconstrained PPO sits
+  # near 0.010, so this asks for roughly a 5x reduction.
+  target_rate: 0.002
+  # Dual-gradient step size on lambda, applied at episode boundaries.
+  lambda_lr: 2.0
+  lambda_init: 0.0
+  lambda_max: 50.0
+  ema_beta: 0.9
 
 demo:
   steps: 800

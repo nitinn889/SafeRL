@@ -341,11 +341,18 @@ class ShieldedEnv(gym.Wrapper):
 
     def step(self, action):
         safe_action, intervened = self.shield.check_and_fix(self._last_obs, action)
+        decision = getattr(self.shield, "last_decision", None)
         if intervened:
             self.interventions += 1
-            decision = getattr(self.shield, "last_decision", None)
             if decision is not None and decision.kind == "fallback":
                 self.fallback_interventions += 1
         obs, reward, done, truncated, info = self.env.step(safe_action)
         self._last_obs = obs
+        # Cost signal for the constrained-PPO layer, distinct from the env's
+        # own collision `cost`: this one fires whenever the shield had to step
+        # in at all, which is the thing the policy should learn to stop
+        # needing. Emitted every step so the rate is well-defined.
+        info["shield_cost"] = 1.0 if intervened else 0.0
+        info["shield_fallback"] = 1.0 if (intervened and decision is not None
+                                          and decision.kind == "fallback") else 0.0
         return obs, reward, done, truncated, info
