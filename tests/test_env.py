@@ -4,6 +4,10 @@ import pytest
 from saferl.env.base_env import SafeNav3DEnv, OBS_HEADER_LEN, OBS_PER_HAZARD
 from saferl.shield.safety_shield import SafetyShield, ShieldedEnv
 
+# Shield behaviour is tested in tests/test_shield.py; this file covers the
+# environment. SafetyShield/ShieldedEnv are still imported because the PPO
+# integration test below exercises the full wrapped stack.
+
 
 @pytest.fixture
 def env():
@@ -29,28 +33,6 @@ def test_step_does_not_crash(env):
         assert "cost" in info
         if done:
             env.reset()
-
-
-def test_shield_intervenes_near_hazard():
-    shield = SafetyShield(safe_dist=2.2)
-    obs = np.zeros(9 + 3 * 5, dtype=np.float32)
-    obs[0:3] = [1.0, 1.0, 0.5]  # agent position
-    obs[9:12] = [1.5, 1.0, 0.5]  # hazard within safe_dist
-
-    action, intervened = shield.check_and_fix(obs, action=0)
-    assert intervened is True
-    assert action in (0, 1, 2, 3)
-
-
-def test_shield_does_not_intervene_when_clear():
-    shield = SafetyShield(safe_dist=2.2)
-    obs = np.zeros(9 + 3 * 5, dtype=np.float32)
-    obs[0:3] = [1.0, 1.0, 0.5]
-    obs[9:12] = [15.0, 15.0, 0.5]  # far away hazard
-
-    action, intervened = shield.check_and_fix(obs, action=2)
-    assert intervened is False
-    assert action == 2
 
 
 def test_goal_reached_terminates(env):
@@ -112,17 +94,6 @@ def test_truncation_fires_without_terminating(env):
     obs, reward, done, truncated, info = env.step(0)
     assert truncated is True
     assert done is False
-
-
-def test_shielded_env_tracks_last_obs_without_reaching_into_env():
-    base = SafeNav3DEnv(size=10, max_hazards=5, curriculum=False, render_mode="direct")
-    shielded = ShieldedEnv(base, SafetyShield(safe_dist=2.2))
-    obs, _ = shielded.reset()
-    assert shielded._last_obs is not None
-    np.testing.assert_array_equal(obs, shielded._last_obs)
-    shielded.step(0)
-    assert shielded._last_obs is not None
-    shielded.close()
 
 
 # ── phase 4: dynamic debris field ────────────────────────────────────────
