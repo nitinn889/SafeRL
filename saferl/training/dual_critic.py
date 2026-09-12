@@ -281,6 +281,7 @@ class ConstrainedPPO(PPO):
 
         ent_losses, pg_losses, vf_losses, cvf_losses = [], [], [], []
         clip_fractions = []
+        cost_estimates, cost_observed = [], []
 
         continue_training = True
         for epoch in range(self.n_epochs):
@@ -321,6 +322,13 @@ class ConstrainedPPO(PPO):
                 cost_value_loss = F.mse_loss(
                     rollout_data.cost_returns, cost_values)
                 cvf_losses.append(cost_value_loss.item())
+                # Logged as two separate traces rather than only their MSE:
+                # the loss alone cannot distinguish a critic that is
+                # well-calibrated but noisy from one that is systematically
+                # over- or under-predicting cost, and that bias is the thing
+                # that decides whether lambda is pushing on a real signal.
+                cost_estimates.append(cost_values.mean().item())
+                cost_observed.append(rollout_data.cost_returns.mean().item())
 
                 if entropy is None:
                     entropy_loss = -th.mean(-log_prob)
@@ -363,6 +371,10 @@ class ConstrainedPPO(PPO):
         self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
         self.logger.record("train/value_loss", np.mean(vf_losses))
         self.logger.record("train/cost_value_loss", np.mean(cvf_losses))
+        self.logger.record("train/cost_value_estimate", np.mean(cost_estimates))
+        self.logger.record("train/cost_return_observed", np.mean(cost_observed))
+        self.logger.record("train/cost_value_bias",
+                           np.mean(cost_estimates) - np.mean(cost_observed))
         self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
         self.logger.record("train/clip_fraction", np.mean(clip_fractions))
         self.logger.record("train/loss", loss.item())

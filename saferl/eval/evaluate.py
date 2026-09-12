@@ -34,8 +34,59 @@ def file_md5(path: str) -> str:
     return h.hexdigest()
 
 
+def evaluate_model(model, n_episodes: int = 500, seed: int = 42,
+                   deterministic: bool = True, sensor_range=None,
+                   config_path=None, preserve_rng: bool = False):
+    """Run the protocol against an already-loaded model, for in-training probes.
+
+    Shares the episode loop and every protocol parameter with `evaluate()`
+    (deterministic actions, fixed seed, fixed episode count). It differs in
+    one respect: the model already exists, so it is not loaded inside the
+    seeded region. That shifts which random episodes get drawn, so a number
+    from here is NOT bit-comparable with one from `evaluate()` and must not
+    be reported as an authoritative figure. Use it for convergence
+    monitoring, where a consistently-sampled window is what matters; use
+    `evaluate()` for anything that goes in the README.
+
+    preserve_rng: save/restore the global numpy+torch RNG state around the
+    run, so seeding the probe does not perturb the training run's own
+    exploration stream.
+    """
+    if preserve_rng:
+        np_state = np.random.get_state()
+        torch_state = torch.get_rng_state()
+
+    try:
+        cfg = load_config(config_path)
+        if sensor_range is not None:
+            cfg["env"]["sensor_range"] = sensor_range
+
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+        base = SafeNav3DEnv(render_mode="direct", **cfg["env"])
+        shield = SafetyShield.from_config(cfg)
+        env = ShieldedEnv(base, shield)
+
+        return _run_episodes(model, env, n_episodes, seed, deterministic,
+                             sensor_range)
+    finally:
+        if preserve_rng:
+            np.random.set_state(np_state)
+            torch.set_rng_state(torch_state)
+
+
 def evaluate(checkpoint_path: str, n_episodes: int = 500, seed: int = 42,
              deterministic: bool = True, sensor_range=None, config_path=None):
+    """Authoritative protocol entry point, for reporting a checkpoint's number.
+
+    The statement order here (seed -> build env -> load model) is load-bearing
+    and must not be rearranged. `ConstrainedPPO.load()` draws from the global
+    RNG, so moving it relative to the seed shifts the env's state at the first
+    reset and silently changes which episodes get sampled. This exact order is
+    what phase 8's published figures were produced under; keeping it means a
+    rerun reproduces them episode-for-episode.
+    """
     cfg = load_config(config_path)
     if sensor_range is not None:
         cfg["env"]["sensor_range"] = sensor_range
@@ -55,6 +106,14 @@ def evaluate(checkpoint_path: str, n_episodes: int = 500, seed: int = 42,
         custom_objects={"policy_class": DualCriticPolicy},
     )
 
+    result, rows = _run_episodes(model, env, n_episodes, seed, deterministic,
+                                 sensor_range)
+    result["checkpoint"] = checkpoint_path
+    result["checkpoint_md5"] = ckpt_hash
+    return result, rows
+
+
+def _run_episodes(model, env, n_episodes, seed, deterministic, sensor_range):
     rows = []
     goals, collisions, total_interventions, total_steps = 0, 0, 0, 0
 
@@ -101,8 +160,8 @@ def evaluate(checkpoint_path: str, n_episodes: int = 500, seed: int = 42,
     iv_rate = total_interventions / max(total_steps, 1)
 
     result = dict(
-        checkpoint=checkpoint_path,
-        checkpoint_md5=ckpt_hash,
+        checkpoint="",
+        checkpoint_md5="",
         n_episodes=n_episodes,
         seed=seed,
         deterministic=deterministic,
