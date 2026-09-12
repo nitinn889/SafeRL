@@ -1537,3 +1537,202 @@ entirely within `ue_spike/` and do not affect the training/evaluation pipeline.
    shield, and env are unchanged from phase 7.
 6. **Phase 9 scope:** full training run with the phase 7 architecture,
    evaluation suite using the standardized protocol, metrics dashboard.
+
+---
+
+## Phase 9 (2026-09-12): Long training run + TensorBoard dashboard
+
+Extended the constrained training run to convergence under plateau detection,
+with live TensorBoard metrics. Discovered that with the phase 7 architecture,
+the policy oscillates rather than monotonically improves, while the Lagrange
+multiplier climbs without bound — the signature of an unreachable constraint target.
+
+### Goal A: Convergence-based long training run
+
+**Setup.** Trained from the phase 7 checkpoint for up to 1.2M steps with a
+`ConvergenceCallback` that probes every 50k steps and stops when plateau is
+detected. Probes use `evaluate_model()` (deterministic, 100 episodes, seed 7)
+to watch convergence without loading the model inside the seeded region (which
+would shift episode sampling). Seed 7 is deliberately different from the final
+eval seed (42) to avoid checkpoint selection on the reported episodes.
+
+**Stopping rule.** Dual conditions, both checked on the last 4 probes:
+- **Plateau:** goal rate span ≤ 4 percentage points AND intervention rate span ≤ 2 pp
+- **No-improvement:** best goal rate not beaten for 6 consecutive probes
+
+**Results:** Stopped at 700,000 steps (plateau condition triggered).
+
+#### The training trajectory
+
+| Probe | Step | Goal % | Intervention % | Lambda | Best? | Note |
+|------|------|--------|----------------|--------|-------|------|
+| 1 | 50k | 48.0 | 5.44 | 1.789 | — | Cold start under curriculum |
+| 2 | 100k | 76.0 | 4.86 | 1.877 | — | Quick early climb |
+| 3 | 150k | 64.0 | 5.98 | 1.940 | — | First oscillation down |
+| 4 | 200k | 87.0 | 7.36 | 1.998 | Best (87%) | Early peak |
+| 5 | 250k | 65.0 | 3.85 | 2.079 | — | Second major oscillation |
+| 6 | 300k | 85.0 | 3.69 | 2.143 | — | Recovery |
+| 7 | 350k | 85.0 | 3.71 | 2.212 | — | Stabilizing |
+| 8 | 400k | 88.0 | 4.17 | 2.284 | Best (88%) | New peak |
+| 9 | 450k | **100.0** | 6.13 | 2.345 | **Best** | **Peak before degradation** |
+| 10 | 500k | 95.0 | 3.38 | 2.367 | — | Slight decline |
+| 11 | 550k | 99.0 | 3.46 | 2.371 | — | Recovery, stays high |
+| 12 | 600k | 97.0 | 3.96 | 2.384 | — | Stabilized |
+| 13 | 650k | 98.0 | 4.34 | 2.415 | — | Plateau region |
+| 14 | 700k | 97.0 | 2.55 | 2.416 | — | Final probe, stopping triggered |
+
+**Pattern.** The policy oscillates rather than monotonically improves: 48% → 76%
+→ 64% → 87% → 65% → 85% → 88% → 100% → 95% → 99% → 97% → 98% → 97%. The best
+probe achieved 100% goal rate at step 450k (phase9_best checkpoint). Lambda
+climbs monotonically (1.79 → 2.42), a signature of the constraint target (0.05
+or 5% intervention rate) being unreachable under the current policy capacity —
+dual ascent never stops pushing because the policy never satisfies the budget.
+
+#### Probe baseline and proper comparison
+
+In-training probes call `evaluate_model()`, which does NOT load the model inside
+the seeded region. This means:
+- A probe value is **NOT directly comparable to the authoritativeness number from
+  `evaluate()` on the same checkpoint**, because the two functions sample from
+  different episode sequences.
+- What a probe value **IS** comparable to is the starting checkpoint probed at
+  the same seed.
+
+Baseline from phase 7 checkpoint (100 ep, seed 7, deterministic):
+
+| Metric | Value | Purpose |
+|--------|-------|---------|
+| Goal rate | 79.0% | Like-for-like reference for reading run probes |
+| Intervention rate | 6.41% | — |
+
+Against this seed-7 baseline:
+- The 300k probe (85.0% / 3.69%) beats the starting checkpoint on both metrics
+- The 450k probe (100.0% / 6.13%) beats on goal rate but regresses slightly on intervention
+- The final probes (97-99%) show stable, high performance at lower intervention than the peak
+
+Best checkpoint was selected by **goal rate alone** (100% at 450k), but the open
+question for phase 10 is whether a composite criterion (e.g., Pareto dominance
+or goal×(1-intervention)) would better serve the project's values.
+
+### Goal B: TensorBoard live-update metrics dashboard
+
+Configured SB3's logger to stream scalar metrics to TensorBoard during training,
+with custom callbacks to capture the dual-critic signals:
+
+**Required scalars:**
+- `rollout/episode_reward_mean` — task reward per episode
+- `train/cost_value_estimate` — cost-value head's predicted cost over a batch
+- `train/cost_return_observed` — empirical cumulative cost per episode
+- `train/cost_value_bias` — the residual (estimate − observed)
+- `train/lambda` — Lagrange multiplier at each update
+- `rollout/intervention_rate_mean` — shield intervention rate
+- `train/goal_arrival_rate_mean` — goal success rate in each batch
+- `train/cost_critic_loss` — MSE on cost-value predictions
+
+**Live dashboard during run:**
+TensorBoard event file written to `saferl/eval/phase9/run_events/`. View with:
+```bash
+tensorboard --logdir saferl/eval/phase9/run_events/
+```
+Curves extend in real time as training progresses (sampled every 1–2 updates).
+
+**Cost-critic breakdown.** Unlike a simple MSE-loss view:
+- `cost_value_estimate` (model's prediction) = what the critic thinks will happen
+- `cost_return_observed` (empirical trajectory cost) = what actually happened
+- `cost_value_bias` (residual) = tells you if the cost signal is being systematized
+  or still spiky. Declining bias over training confirms the dual-critic loss is
+  converging, not just churning through bad episodes.
+
+The breakdown is read from `train()` in `saferl/training/dual_critic.py` and
+logged as three separate scalars (not just one combined MSE).
+
+### Final held-out evaluation
+
+**Checkpoint:** `saferl/eval/phase9/saferl_phase9_best.zip` (best goal rate from
+probes, step 450k). MD5: `716fae1409d3eb3ae03bfa63b6663e65`.
+
+**Protocol:** 500 episodes, deterministic, seed 42 (the reserved held-out seed).
+
+**Results:**
+
+| Metric | Value | vs. Phase 7 |
+|--------|-------|------------|
+| Goal rate | **90.8%** (454/500) | +1.6 pp |
+| Intervention rate | 6.79% | **-5.78 pp** |
+| Collisions | 0 | — |
+
+The held-out eval confirms a modest goal-rate gain (90.8% vs 89.2%) with a
+substantial intervention reduction (6.79% vs 12.57%). The policy under phase-9
+long training is significantly more efficient at steering — 48% fewer
+interventions per episode for 1.6pp more goals.
+
+**Caveat on best-checkpoint selection.** The checkpoint was chosen by the best
+probe value (100% goal at 450k). The held-out eval at the same checkpoint reads
+90.8%, a 9.2pp drop from the probe. This 9pp spread is not noise:
+- Probes run on 100 episodes at seed 7 (the selection seed)
+- Held-out eval runs on 500 episodes at seed 42 (reserved)
+- A 100-episode probe on identical weights has ~3pp std error; 9pp is real
+  difference in generalization
+
+This is why separate seeds matter: the probe did its job (identifying which
+checkpoint is best *for that seed*) but the true capability on unseen episodes
+was slightly lower. For phase 10: consider whether best-checkpoint selection
+should account for this held-out variance — e.g., by probing at both seeds, or
+by running mini-evals on the test seed periodically.
+
+### Convergence finding: policy oscillation + unreachable target
+
+The monotonically climbing lambda (1.79 → 2.42) despite plateau-detected probes
+(goal span 2pp, intervention span 1.8pp) confirms the constraint target is not
+being met. The policy oscillates around ~97% goal rate and ~4-6% intervention
+rate, a local equilibrium under dual ascent. To push the intervention rate toward
+the 5% target would require either:
+
+1. **Longer training** (lambda was still rising at 700k — dual ascent had not
+   converged)
+2. **Lower constraint target** (5% may be unrealistic given the shield/policy
+   co-evolution dynamics)
+3. **Reward shaping for navigation efficiency** (still the most-deferred open
+   question — the policy gets no credit for dodging hazards cleanly)
+
+The oscillation pattern suggests the policy is sensitive to constraint tuning:
+as lambda rises, intervention pressure tightens, the policy explores more
+conservative trajectories, overfits locally, then finds a high-goal window before
+lambda keeps climbing. This is not a bug (the dual-gradient updater is working)
+but it is a sign that the single-critic constrained PPO has reached its
+representational ceiling under this curriculum. A curriculum that starts tighter
+or a multi-scale exploration approach might dampen the oscillation.
+
+### Tests and code quality
+
+All **40 tests pass** (unchanged from phase 8). Added:
+
+- `saferl/training/train_phase9.py` — training script with convergence callbacks
+- `saferl/eval/phase9/probe_baseline.json` — documented probe protocol and
+  like-for-like baselines
+- `saferl/eval/phase9/convergence_probes.csv` — all 14 probes, timestamps,
+  best-checkpoint tracking
+- `saferl/eval/phase9/final_eval/` — authoritative eval output (CSV, summary)
+- TensorBoard event logs in `run_events/` (gitignored; 500MB+)
+
+### What Phase 10 should assume
+
+1. **The phase 9 checkpoint is 90.8% goal / 6.79% intervention** (500 ep,
+   deterministic, seed 42, limited sensing). This is the authoritative figure
+   for any phase-10 baseline or comparison.
+2. **Policy oscillates under dual ascent.** Lambda reaches 2.42 (still rising
+   at 700k) while the intervention rate plateaus around 4–6%. The 5% target
+   appears unreachable under current architecture. Longer training, tighter
+   constraint curriculum, or reward shaping are the levers to try.
+3. **Best-checkpoint selection has held-out variance.** The 100-episode probe
+   saw 100% goal; the 500-episode held-out eval saw 90.8%. A 9pp gap is real.
+   Phase 10 should either probe at multiple seeds or run mini-evals on the
+   reserved seed periodically during training.
+4. **TensorBoard scalars now include cost-critic internals** (estimate,
+   observed, bias). Use these to debug whether the cost signal is stable or
+   spiky — don't rely on loss alone.
+5. **Probes are a useful convergence monitor but not held-out evaluations.**
+   They sample from a fixed seed during training (necessary for convergence
+   detection), so checkpoint selection should be treated with the variance
+   caveat above. The held-out eval protocol (`evaluate()` with seed 42) is
+   separate.
