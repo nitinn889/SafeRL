@@ -77,7 +77,8 @@ def evaluate_model(model, n_episodes: int = 500, seed: int = 42,
 
 
 def evaluate(checkpoint_path: str, n_episodes: int = 500, seed: int = 42,
-             deterministic: bool = True, sensor_range=None, config_path=None):
+             deterministic: bool = True, sensor_range=None, config_path=None,
+             curriculum=None):
     """Authoritative protocol entry point, for reporting a checkpoint's number.
 
     The statement order here (seed -> build env -> load model) is load-bearing
@@ -86,10 +87,23 @@ def evaluate(checkpoint_path: str, n_episodes: int = 500, seed: int = 42,
     reset and silently changes which episodes get sampled. This exact order is
     what phase 8's published figures were produced under; keeping it means a
     rerun reproduces them episode-for-episode.
+
+    `curriculum` controls the difficulty the run is measured at, and it
+    matters more than it looks. The config ships `curriculum: true` for
+    training, and a *fresh* env restarts that ramp at episode 0 --
+    `num_hazards = min(max_hazards, 1 + episode_count // 50)` -- so a default
+    500-episode eval spends its first 200 episodes facing 1-4 hazards and
+    only the last 300 at the full 5. Roughly 40% of the run is therefore
+    easier than the scenario the demo actually shows. Leave this None to
+    inherit the config (what every figure published before phase 10 used),
+    or pass False to hold all `max_hazards` active from episode 0 and
+    measure full fixed difficulty. Phase 10 reports both, labelled.
     """
     cfg = load_config(config_path)
     if sensor_range is not None:
         cfg["env"]["sensor_range"] = sensor_range
+    if curriculum is not None:
+        cfg["env"]["curriculum"] = curriculum
 
     device = cfg["training"].get("device", "cpu")
     ckpt_hash = file_md5(checkpoint_path)
@@ -110,6 +124,12 @@ def evaluate(checkpoint_path: str, n_episodes: int = 500, seed: int = 42,
                                  sensor_range)
     result["checkpoint"] = checkpoint_path
     result["checkpoint_md5"] = ckpt_hash
+    # Stamp the difficulty condition into the result itself. Phase 10 found
+    # two very different numbers for the same checkpoint depending on this
+    # flag; recording it means a stored eval_summary.csv can never again be
+    # read without knowing which condition produced it.
+    result["curriculum"] = bool(cfg["env"].get("curriculum"))
+    result["max_hazards"] = cfg["env"].get("max_hazards")
     return result, rows
 
 
@@ -188,11 +208,20 @@ def main():
                     help="Override sensor range (None = use config default)")
     ap.add_argument("--out-dir", default=None,
                     help="Save per-episode CSV here (default: no file output)")
+    ap.add_argument("--no-curriculum", action="store_true",
+                    help="Hold all max_hazards active from episode 0 (full "
+                         "fixed difficulty). Without this the run inherits "
+                         "the config's training curriculum, which restarts "
+                         "its 1->5 hazard ramp at episode 0 and leaves ~40%% "
+                         "of a 500-episode run below full difficulty.")
     args = ap.parse_args()
+
+    curriculum = False if args.no_curriculum else None
 
     print(f"Evaluating: {args.checkpoint}")
     print(f"  episodes={args.episodes}  seed={args.seed}  "
           f"deterministic={not args.stochastic}  sensor_range={args.sensor_range}")
+    print(f"  difficulty: {'full fixed (curriculum off)' if args.no_curriculum else 'config default (curriculum inherited)'}")
 
     result, rows = evaluate(
         args.checkpoint,
@@ -200,6 +229,7 @@ def main():
         seed=args.seed,
         deterministic=not args.stochastic,
         sensor_range=args.sensor_range,
+        curriculum=curriculum,
     )
 
     print(f"\nResults ({result['n_episodes']} episodes, "

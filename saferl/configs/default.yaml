@@ -65,6 +65,11 @@ shield:
   lookahead_steps: 20
 
 training:
+  # Default for the original phase-2 entry point (saferl.training.train) only.
+  # This is NOT how the reported checkpoint was produced: that came from
+  # phase 7 fine-tuning followed by phase 9's convergence-stopped run, which
+  # take their step budgets from their own --timesteps/--max-timesteps
+  # arguments. Don't read this number as "the project trains for 30k steps".
   timesteps: 30000
   # Measured, not assumed: CPU runs this workload at 837 fps against CUDA's
   # 592 on an RTX 5060 Laptop (8.1GB). The env alone runs at 2700 fps, so most
@@ -94,6 +99,6 @@ constrained:
   lambda_max: 5.0
   ema_beta: 0.9
 
-demo:
-  steps: 800
-  fps: 60
+# (A `demo:` block with steps/fps lived here until phase 10. Its only reader
+# was the phase-2 version of saferl.demo.run_demo, which phase 10 rewrote to
+# take --episodes/--fps arguments instead, so the block was dead config.)

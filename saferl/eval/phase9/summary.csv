@@ -1,0 +1,2 @@
+arm,episodes,last_rate,last_task_reward,last_ivs_per_ep,last_fallbacks_per_ep,last_steps,goals,collisions,final_lambda,goal_rate_pct,stopped_at,stop_reason,best_probe_goal_rate,best_probe_timestep
+phase9,1984,0.058006464646464646,49.39368686868687,22.01010101010101,0.43686868686868685,346.97222222222223,1683,0,2.4158,84.8,700000,plateau: goal and intervention rate both flat across 4 consecutive probes,1.0,450000
