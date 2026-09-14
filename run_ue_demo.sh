@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # One-command Unreal demo: trained policy flying the debris field, live.
 #
-#   ./run_ue_demo.sh                      # 450k checkpoint, full 5-hazard field
+#   ./run_ue_demo.sh                                        # 2D: 450k checkpoint, 5 hazards
+#   ./run_ue_demo.sh --config saferl/configs/space3d.yaml  # 3D flight through a debris volume
+#   ./run_ue_demo.sh --config saferl/configs/space3d.yaml --camera chase
 #   ./run_ue_demo.sh --checkpoint X.zip   # some other checkpoint
 #   ./run_ue_demo.sh --fps 15             # slower, easier to watch
+#
+# Cameras: fixed (2D default), wide (3D default), chase. Switch while running:
+#   echo chase > ue_spike/camera_mode
 #
 # What it does, in order:
 #   1. finds the Unreal engine install, remounting its drive if needed
@@ -23,13 +28,17 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CHECKPOINT="saferl/eval/phase9/saferl_phase9_best.zip"   # 450k, the reported checkpoint
+CHECKPOINT=""        # default depends on the config's dims; see below
+CONFIG=""
+CAMERA=""
 FPS=30
 EXTRA=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --checkpoint) CHECKPOINT="$2"; shift 2 ;;
+    --config)     CONFIG="$2"; shift 2 ;;
+    --camera)     CAMERA="$2"; shift 2 ;;
     --fps)        FPS="$2"; shift 2 ;;
     -h|--help)    awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' \
                       "${BASH_SOURCE[0]}"; exit 0 ;;
@@ -38,6 +47,27 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$REPO"
+
+# ── 0. what the config describes ─────────────────────────────────────────
+# UE's embedded Python can't be assumed to have PyYAML, so the config is read
+# here with the venv and the scene gets the values it needs as env vars.
+read -r DIMS NUM_DEBRIS ENV_SIZE < <(.venv/bin/python - "$CONFIG" <<'PYEOF'
+import sys
+from saferl.config import load_config
+env = load_config(sys.argv[1] or None)["env"]
+print(env.get("dims", 2), env["max_hazards"], env["size"])
+PYEOF
+)
+if [[ -z "${DIMS:-}" ]]; then
+  echo "[demo] ERROR: could not read config ${CONFIG:-saferl/configs/default.yaml}"; exit 1
+fi
+if [[ -z "$CHECKPOINT" ]]; then
+  if [[ "$DIMS" == "3" ]]; then
+    CHECKPOINT="saferl/eval/space3d/long/saferl_space3d_best.zip"
+  else
+    CHECKPOINT="saferl/eval/phase9/saferl_phase9_best.zip"   # 450k, the reported 2D checkpoint
+  fi
+fi
 
 # ── 1. engine ────────────────────────────────────────────────────────────
 # The engine lives on a separate drive that does not auto-mount and is not in
@@ -58,7 +88,9 @@ if [[ ! -x "$ENGINE" ]]; then
 fi
 
 if [[ ! -f "$CHECKPOINT" ]]; then
-  echo "[demo] ERROR: checkpoint not found: $CHECKPOINT"; exit 1
+  echo "[demo] ERROR: checkpoint not found: $CHECKPOINT"
+  [[ "$DIMS" == "3" ]] && echo "       The 3D checkpoint is produced by the 3D training pipeline (see README)."
+  exit 1
 fi
 
 # Refuse to race a demo that is already up. Two bridges publishing to one
@@ -88,9 +120,11 @@ cleanup() {
 trap cleanup INT TERM
 
 # ── 2. launch the editor ─────────────────────────────────────────────────
-rm -f "$HEARTBEAT" "$STATE"
-echo "[demo] launching Unreal editor (log: $UE_LOG)"
+rm -f "$HEARTBEAT" "$STATE" "$REPO/ue_spike/camera_mode"
+echo "[demo] launching Unreal editor: ${DIMS}D, ${NUM_DEBRIS} rocks (log: $UE_LOG)"
+[[ -n "$CAMERA" ]] && export SAFERL_CAMERA="$CAMERA"
 SAFERL_RUN_PIE=1 SAFERL_UNCAP=1 SAFERL_LIVE_POLICY=1 \
+  SAFERL_DIMS="$DIMS" SAFERL_NUM_DEBRIS="$NUM_DEBRIS" SAFERL_ENV_SIZE="$ENV_SIZE" \
   "$ENGINE" "$UPROJECT" -nosound -log > "$UE_LOG" 2>&1 &
 UE_PID=$!
 
@@ -113,9 +147,12 @@ echo "[demo] UE is live and mirroring."
 
 # ── 4. run the policy, streaming metrics here ────────────────────────────
 echo "[demo] starting the trained policy: $CHECKPOINT"
+echo "[demo] switch camera: echo chase > ue_spike/camera_mode   (or wide / fixed)"
 echo "[demo] Ctrl-C to stop."
 echo ""
+CFG_ARGS=()
+[[ -n "$CONFIG" ]] && CFG_ARGS=(--config "$CONFIG")
 .venv/bin/python -u -m saferl.demo.live_policy_bridge \
-  --checkpoint "$CHECKPOINT" --fps "$FPS" "${EXTRA[@]}"
+  --checkpoint "$CHECKPOINT" --fps "$FPS" "${CFG_ARGS[@]}" "${EXTRA[@]}"
 
 cleanup

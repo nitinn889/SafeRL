@@ -24,3 +24,5 @@ ue_spike/demo_capture/live_seq_*.png
 ue_spike/live_seq_*.png
 ue_spike/live_seq_meta.json
 ue_spike/live_policy_capture_*.png
+ue_spike/Content/Maps/
+ue_spike/camera_mode

@@ -37,19 +37,41 @@ Phase 8c real-asset changes (replaces phase 8's procedural geometry):
       texture replacing the flat placeholder material).
     - All real assets have a composite/procedural fallback if import fails,
       logged explicitly rather than failing silently.
+
+3D space mode (SAFERL_DIMS=3, set by run_ue_demo.sh --config space3d.yaml):
+    - Builds in its own empty level (/Game/Maps/SpaceLevel, generated on first
+      run) instead of the default Open World template, whose Landscape was the
+      checkerboard floor. Black void, one hard sun, locked manual exposure.
+    - Mirrors SAFERL_NUM_DEBRIS rocks (cycling the scanned meshes) moving on all
+      three axes, with the goal at the far corner of the cube.
+    - Wide and chase cameras (SAFERL_CAMERA), switchable live by writing
+      "wide" or "chase" to ue_spike/camera_mode. Satellite heading and rock
+      tumble are visual only; the env simulates neither.
 """
 import json
 import math
 import os
+import random
 import time
 
 import unreal
 
-# ── layout, mirroring saferl/configs/default.yaml's PyBullet env ──────────
+# ── layout, mirroring the PyBullet env the launcher's config describes ──────
+# UE's embedded Python 3.11 can't be assumed to have PyYAML, so run_ue_demo.sh
+# reads the config with the project venv and passes the few values the scene
+# needs as environment variables. Defaults are the planar default.yaml.
 SCALE = 200.0          # 1 env unit = 200cm, so a size-10 field is 20m across
-ENV_SIZE = 10
-START_ENV_POS = (0.0, 0.0, 0.5)
-GOAL_ENV_POS = (ENV_SIZE - 1, ENV_SIZE - 1, 0.5)
+DIMS = int(os.environ.get("SAFERL_DIMS", "2"))
+ENV_SIZE = int(os.environ.get("SAFERL_ENV_SIZE", "10"))
+NUM_DEBRIS = int(os.environ.get("SAFERL_NUM_DEBRIS", "5"))
+SPACE_LEVEL = os.environ.get("SAFERL_SPACE_LEVEL", "1" if DIMS == 3 else "0") == "1"
+SPACE_LEVEL_PATH = "/Game/Maps/SpaceLevel"
+if DIMS == 3:
+    START_ENV_POS = (0.0, 0.0, 0.0)
+    GOAL_ENV_POS = (ENV_SIZE - 1, ENV_SIZE - 1, ENV_SIZE - 1)
+else:
+    START_ENV_POS = (0.0, 0.0, 0.5)
+    GOAL_ENV_POS = (ENV_SIZE - 1, ENV_SIZE - 1, 0.5)
 DEBRIS_ENV_POS = [            # fixed (not random) so the visual is reproducible
     (2.0, 3.0, 0.5),
     (4.5, 1.5, 0.5),
@@ -74,6 +96,22 @@ DEBRIS_SCALES = [
     (2.2, 1.5, 1.7),
 ]
 
+
+def _debris_spawn_pos(i):
+    """Where debris i sits before the live bridge starts moving it.
+
+    The first five planar slots keep phase 8's hand-placed positions, so the
+    2D scene is unchanged. Any further slot, and every 3D slot, gets a
+    deterministic position inside the field derived from its index.
+    """
+    if DIMS == 2 and i < len(DEBRIS_ENV_POS):
+        return DEBRIS_ENV_POS[i]
+    r = random.Random(1000 + i)
+    lo, hi = 1.0, ENV_SIZE - 2.0
+    x, y = r.uniform(lo, hi), r.uniform(lo, hi)
+    return (x, y, r.uniform(lo, hi) if DIMS == 3 else 0.5)
+
+
 SATELLITE_TAG = "SafeRLSatellite"
 SATELLITE_PART_TAG = "SafeRLSatPart"
 DEBRIS_TAG = "SafeRLDebris"
@@ -81,8 +119,12 @@ GOAL_TAG = "SafeRLGoal"
 CAPTURE_TAG = "SafeRLCapture"
 SKY_TAG = "SafeRLSky"
 LIGHT_TAG = "SafeRLLight"
+CAMERA_TAG = "SafeRLCamera"
+POSTFX_TAG = "SafeRLPostFX"
+PLAYER_START_TAG = "SafeRLPlayerStart"
 ALL_TAGS = (SATELLITE_TAG, SATELLITE_PART_TAG, DEBRIS_TAG, GOAL_TAG,
-            CAPTURE_TAG, SKY_TAG, LIGHT_TAG)
+            CAPTURE_TAG, SKY_TAG, LIGHT_TAG, CAMERA_TAG, POSTFX_TAG,
+            PLAYER_START_TAG)
 
 NUM_STEPS = 500
 BOOT_TICKS = 120
@@ -109,6 +151,19 @@ CAM_ROTATION = unreal.Rotator(
     float(os.environ.get("SAFERL_CAM_PITCH", "-34.5")),
     float(os.environ.get("SAFERL_CAM_YAW", "133.4")),
 )
+# Camera mode. "fixed" is the framing above (phase 3's, and the 2D default).
+# "wide" frames the whole field from outside a corner; "chase" follows the
+# satellite from behind and above along its smoothed velocity. Switch while
+# running by writing "wide"/"chase"/"fixed" to CAMERA_MODE_PATH.
+CAMERA_MODE = os.environ.get("SAFERL_CAMERA", "wide" if DIMS == 3 else "fixed")
+CHASE_BACK_CM = 900.0
+CHASE_UP_CM = 350.0
+CHASE_LERP = 0.12          # fraction of the remaining gap closed per tick
+# Space look. Manual exposure, so auto-exposure can't adapt to whatever fills
+# the frame and crush the stars or blow out the rocks. Defaults are tuned by
+# measuring captures; all three are overridable.
+EXPOSURE_BIAS = float(os.environ.get("SAFERL_EXPOSURE_BIAS", "0.0"))
+SUN_LUX = float(os.environ.get("SAFERL_SUN_LUX", "8.0"))
 ACTION_TABLE = {
     0: (0.0, FORCE_ACCEL),
     1: (0.0, -FORCE_ACCEL),
@@ -143,6 +198,7 @@ LIVE_CAPTURE_EVERY = int(os.environ.get("SAFERL_LIVE_CAPTURE_EVERY", "450"))
 LIVE_CAPTURE_SEQ = int(os.environ.get("SAFERL_LIVE_CAPTURE_SEQ", "0"))
 RESULTS_PATH = os.path.normpath(os.path.join(_HERE, "..", "..", RESULTS_NAME))
 LIVE_STATE_PATH = os.path.normpath(os.path.join(_HERE, "..", "..", LIVE_STATE_NAME))
+CAMERA_MODE_PATH = os.path.normpath(os.path.join(_HERE, "..", "..", "camera_mode"))
 
 SPHERE = "/Engine/BasicShapes/Sphere.Sphere"
 CUBE = "/Engine/BasicShapes/Cube.Cube"
@@ -173,6 +229,11 @@ MOON_ROCK_NAMES = ["moon_rock_03", "moon_rock_04", "moon_rock_05",
 STARMAP_EXR_NAME = "nasa_starmap_2020_4k"
 # Emissive gain on the starmap; see _get_or_create_starmap_material.
 STARMAP_EMISSIVE_GAIN = float(os.environ.get("SAFERL_STARMAP_GAIN", "60.0"))
+# The gain is a material parameter, set on a material instance each launch, so
+# it can be tuned without rebuilding the material. "_v2" because the first
+# version baked the gain in as a constant.
+STARMAP_BASE_MATERIAL = "M_Starmap_Sky_v2"
+STARMAP_INSTANCE = "MI_Starmap_Sky"
 
 SATELLITE_TARGET_MAX_DIM_CM = 500.0   # longest dimension after rescale
 ROCK_TARGET_MAX_DIM_CM = [190, 230, 160, 210, 250]  # per-rock variety
@@ -500,51 +561,61 @@ def _ensure_nanite_usage(material, content_path):
 
 
 def _get_or_create_starmap_material(texture):
-    """Build (or reuse) an unlit emissive material that shows `texture`
-    directly regardless of scene lighting -- the standard technique for a
-    textured skybox dome."""
-    content_path = f"{TEXTURES_CONTENT_PATH}/M_Starmap_Sky"
-    existing = unreal.EditorAssetLibrary.load_asset(content_path)
-    if existing is not None:
-        _ensure_nanite_usage(existing, content_path)
-        return existing
+    """Build (or reuse) an unlit emissive starmap material, and return an
+    instance of it with the current gain applied.
 
+    Unlit emissive shows the texture regardless of scene lighting -- the
+    standard technique for a textured skybox dome. The texture is scaled by a
+    "Gain" parameter before it reaches emissive: the NASA map is linear HDR
+    data whose stars are, faithfully, very dim.
+    """
     asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
-    factory = unreal.MaterialFactoryNew()
-    material = asset_tools.create_asset(
-        "M_Starmap_Sky", TEXTURES_CONTENT_PATH, unreal.Material, factory)
+    base_path = f"{TEXTURES_CONTENT_PATH}/{STARMAP_BASE_MATERIAL}"
+    base = unreal.EditorAssetLibrary.load_asset(base_path)
+    if base is None:
+        base = asset_tools.create_asset(
+            STARMAP_BASE_MATERIAL, TEXTURES_CONTENT_PATH, unreal.Material,
+            unreal.MaterialFactoryNew())
+        mel = unreal.MaterialEditingLibrary
+        tex_expr = mel.create_material_expression(
+            base, unreal.MaterialExpressionTextureSample, -350, 0)
+        tex_expr.texture = texture
+        try:
+            base.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+        except Exception as e:
+            _log(f"could not set unlit shading model (non-fatal): {e!r}")
+        gain = mel.create_material_expression(
+            base, unreal.MaterialExpressionScalarParameter, -350, 250)
+        gain.set_editor_property("parameter_name", "Gain")
+        gain.set_editor_property("default_value", STARMAP_EMISSIVE_GAIN)
+        mult = mel.create_material_expression(
+            base, unreal.MaterialExpressionMultiply, -170, 0)
+        mel.connect_material_expressions(tex_expr, "RGB", mult, "A")
+        mel.connect_material_expressions(gain, "", mult, "B")
+        mel.connect_material_property(mult, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+        try:
+            base.set_editor_property("used_with_nanite", True)
+        except Exception as e:
+            _log(f"WARNING: could not set Nanite usage flag on new starmap material: {e!r}")
+        mel.recompile_material(base)
+        unreal.EditorAssetLibrary.save_asset(base_path)
+        _log(f"built unlit starmap material: {base_path}")
+    else:
+        _ensure_nanite_usage(base, base_path)
 
-    tex_expr = unreal.MaterialEditingLibrary.create_material_expression(
-        material, unreal.MaterialExpressionTextureSample, -350, 0)
-    tex_expr.texture = texture
-
-    try:
-        material.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
-    except Exception as e:
-        _log(f"could not set unlit shading model (non-fatal): {e!r}")
-
-    # Scale the starmap up before it reaches emissive. The NASA map is linear
-    # HDR data whose stars are, faithfully, very dim -- and the scene's
-    # auto-exposure adapts to a brightly-lit ground plane, which crushes them
-    # toward black. Phase 8c applied the texture directly and reported the sky
-    # as "real material applied but not strongly visible"; this is the
-    # hypothesis for why.
-    mult = unreal.MaterialEditingLibrary.create_material_expression(
-        material, unreal.MaterialExpressionMultiply, -170, 0)
-    mult.set_editor_property("const_b", STARMAP_EMISSIVE_GAIN)
-    unreal.MaterialEditingLibrary.connect_material_expressions(
-        tex_expr, "RGB", mult, "A")
-
-    unreal.MaterialEditingLibrary.connect_material_property(
-        mult, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
-    try:
-        material.set_editor_property("used_with_nanite", True)
-    except Exception as e:
-        _log(f"WARNING: could not set Nanite usage flag on new starmap material: {e!r}")
-    unreal.MaterialEditingLibrary.recompile_material(material)
-    unreal.EditorAssetLibrary.save_asset(content_path)
-    _log(f"built unlit starmap material: {content_path}")
-    return material
+    inst_path = f"{TEXTURES_CONTENT_PATH}/{STARMAP_INSTANCE}"
+    inst = unreal.EditorAssetLibrary.load_asset(inst_path)
+    if inst is None:
+        inst = asset_tools.create_asset(
+            STARMAP_INSTANCE, TEXTURES_CONTENT_PATH, unreal.MaterialInstanceConstant,
+            unreal.MaterialInstanceConstantFactoryNew())
+        unreal.MaterialEditingLibrary.set_material_instance_parent(inst, base)
+    unreal.MaterialEditingLibrary.set_material_instance_scalar_parameter_value(
+        inst, "Gain", STARMAP_EMISSIVE_GAIN)
+    unreal.MaterialEditingLibrary.update_material_instance(inst)
+    unreal.EditorAssetLibrary.save_asset(inst_path)
+    _log(f"starmap material instance gain={STARMAP_EMISSIVE_GAIN}")
+    return inst
 
 
 def _measure_and_rescale(actor, target_max_dim_cm):
@@ -644,6 +715,84 @@ def _spawn_satellite_composite(env_pos):
     return body
 
 
+# ── space level, camera poses, exposure ──────────────────────────────────────
+
+def _ensure_space_level():
+    """Switch the editor into the project's own empty level, creating it once.
+
+    Without a level of its own the editor opens the default Open World
+    template, whose Landscape is the checkerboard floor under every phase
+    8-10 capture. new_level() creates, saves and loads a blank
+    non-partitioned level; load_level() reopens it on later launches. The
+    .umap is generated, so it is gitignored like the imported assets.
+    """
+    les = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+    if unreal.EditorAssetLibrary.does_asset_exist(SPACE_LEVEL_PATH):
+        ok = les.load_level(SPACE_LEVEL_PATH)
+        _log(f"loaded space level {SPACE_LEVEL_PATH}: {ok}")
+    else:
+        ok = les.new_level(SPACE_LEVEL_PATH, False)
+        _log(f"created space level {SPACE_LEVEL_PATH}: {ok}")
+    return ok
+
+
+def _camera_pose(mode):
+    """(location, rotation) for the fixed and wide modes; chase starts wide."""
+    if mode == "fixed":
+        return CAM_LOCATION, CAM_ROTATION
+    span = ENV_SIZE * SCALE
+    c = span / 2.0
+    if DIMS == 3:
+        loc = unreal.Vector(-0.55 * span, -0.35 * span, 1.1 * span)
+        target = unreal.Vector(c, c, c)
+    else:
+        loc = unreal.Vector(-0.55 * span, -0.35 * span, 0.9 * span)
+        target = unreal.Vector(c, c, 0.0)
+    return loc, unreal.MathLibrary.find_look_at_rotation(loc, target)
+
+
+def _apply_manual_exposure(settings):
+    """Lock exposure. Each property is set on its own, so a name that differs
+    in this engine version is logged instead of silently skipping the rest."""
+    wanted = (
+        ("override_auto_exposure_method", True),
+        ("auto_exposure_method", unreal.AutoExposureMethod.AEM_MANUAL),
+        ("override_auto_exposure_apply_physical_camera_exposure", True),
+        ("auto_exposure_apply_physical_camera_exposure", False),
+        ("override_auto_exposure_bias", True),
+        ("auto_exposure_bias", EXPOSURE_BIAS),
+    )
+    for name, value in wanted:
+        try:
+            settings.set_editor_property(name, value)
+        except Exception as e:
+            _log(f"WARNING: post-process property {name} not set: {e!r}")
+    return settings
+
+
+def _spawn_space_postfx(subsys, capture_actor):
+    """An unbound manual-exposure post-process volume for the view, plus the
+    same settings on the scene capture, which renders with its own copy."""
+    vol = subsys.spawn_actor_from_class(unreal.PostProcessVolume, unreal.Vector(0, 0, 0))
+    vol.set_actor_label("SafeRL_SpacePostFX")
+    vol.tags = [POSTFX_TAG]
+    try:
+        vol.set_editor_property("unbound", True)
+        vol.set_editor_property(
+            "settings", _apply_manual_exposure(vol.get_editor_property("settings")))
+    except Exception as e:
+        _log(f"WARNING: post-process volume setup failed: {e!r}")
+    try:
+        cc = capture_actor.capture_component2d
+        cc.set_editor_property("post_process_blend_weight", 1.0)
+        cc.set_editor_property(
+            "post_process_settings",
+            _apply_manual_exposure(cc.get_editor_property("post_process_settings")))
+    except Exception as e:
+        _log(f"WARNING: scene-capture exposure setup failed: {e!r}")
+    _log(f"space post-process: manual exposure, bias {EXPOSURE_BIAS}")
+
+
 # ── scene construction ──────────────────────────────────────────────────────
 
 def build_scene():
@@ -679,6 +828,15 @@ def build_scene():
             subsys.destroy_actor(actor)
             _log(f"removed default {cls_name} ({label})")
 
+    if SPACE_LEVEL:
+        # A new blank level has no PlayerStart, and PIE with nowhere to spawn
+        # its default Pawn hangs (found in phase 10). One goes well outside the
+        # field; the Pawn it spawns is culled once PIE is up.
+        ps = subsys.spawn_actor_from_class(
+            unreal.PlayerStart, unreal.Vector(-2000.0, -2000.0, 0.0))
+        ps.set_actor_label("SafeRL_PlayerStart")
+        ps.tags = [PLAYER_START_TAG]
+
     # import phase 8 procedural OBJ meshes (used as fallback source only)
     _import_obj_meshes()
 
@@ -688,7 +846,8 @@ def build_scene():
     sky_mesh = _load_sky_dome_mesh_procedural()
     sky = subsys.spawn_actor_from_class(
         unreal.StaticMeshActor,
-        unreal.Vector(ENV_SIZE * SCALE / 2, ENV_SIZE * SCALE / 2, 0),
+        unreal.Vector(ENV_SIZE * SCALE / 2, ENV_SIZE * SCALE / 2,
+                      ENV_SIZE * SCALE / 2 if DIMS == 3 else 0),
     )
     sky.set_actor_label("SafeRL_SkyDome")
     sky.tags = [SKY_TAG]
@@ -732,31 +891,36 @@ def build_scene():
     _log("spawned goal marker")
 
     # ── debris field: real Poly Haven moon rocks, procedural fallback per-slot ──
+    # NUM_DEBRIS actors cycling the scanned meshes. Labels are zero-padded
+    # because the live mirror maps actors to published debris in label order,
+    # where "Debris_10" would otherwise sort before "Debris_2".
     real_rocks = _import_real_rocks()
     n_real = len(real_rocks)
-    asset_report["rocks"] = f"{n_real}/5 real (Poly Haven moon_rock)"
-    for i, pos in enumerate(DEBRIS_ENV_POS):
+    asset_report["rocks"] = (f"{NUM_DEBRIS} rocks from {n_real}/"
+                             f"{len(MOON_ROCK_NAMES)} real Poly Haven meshes")
+    for i in range(NUM_DEBRIS):
+        pos = _debris_spawn_pos(i)
         d = subsys.spawn_actor_from_class(
             unreal.StaticMeshActor, _env_to_world(pos))
-        d.set_actor_label(f"SafeRL_Debris_{i}")
+        d.set_actor_label(f"SafeRL_Debris_{i:02d}")
         d.tags = [DEBRIS_TAG]
         dc = d.static_mesh_component
         dc.set_mobility(unreal.ComponentMobility.MOVABLE)
+        k = i % len(DEBRIS_ROTATIONS)
+        rx, ry, rz = DEBRIS_ROTATIONS[k]
+        # past the first five, turn repeated meshes so they don't read as copies
+        rot = unreal.Rotator(rx, ry, rz + (i // len(DEBRIS_ROTATIONS)) * 67.0)
 
-        if i < n_real:
-            mesh_obj = real_rocks[i]
-            dc.set_static_mesh(mesh_obj)
-            _measure_and_rescale(d, ROCK_TARGET_MAX_DIM_CM[i])
-            rx, ry, rz = DEBRIS_ROTATIONS[i]
-            d.set_actor_rotation(unreal.Rotator(rx, ry, rz), False)
+        if n_real:
+            dc.set_static_mesh(real_rocks[i % n_real])
+            _measure_and_rescale(d, ROCK_TARGET_MAX_DIM_CM[k])
+            d.set_actor_rotation(rot, False)
             _log(f"spawned REAL debris {i} (moon_rock) at env {pos}")
         else:
-            debris_mesh = _load_debris_mesh_procedural(i)
-            dc.set_static_mesh(debris_mesh)
-            sx, sy, sz = DEBRIS_SCALES[i]
+            dc.set_static_mesh(_load_debris_mesh_procedural(k))
+            sx, sy, sz = DEBRIS_SCALES[k]
             d.set_actor_scale3d(unreal.Vector(sx, sy, sz))
-            rx, ry, rz = DEBRIS_ROTATIONS[i]
-            d.set_actor_rotation(unreal.Rotator(rx, ry, rz), False)
+            d.set_actor_rotation(rot, False)
             _log(f"spawned FALLBACK debris {i} (procedural) at env {pos}")
 
     # ── lighting: single harsh directional light (distant sun) ──
@@ -769,7 +933,7 @@ def build_scene():
     # pitch down at ~30 degrees, rotated to cast shadows across the field
     sun.set_actor_rotation(unreal.Rotator(0.0, -30.0, 160.0), False)
     light_comp = sun.light_component
-    light_comp.set_editor_property("intensity", 8.0)
+    light_comp.set_editor_property("intensity", SUN_LUX)
     # harsh shadows, no volumetric scattering
     light_comp.set_editor_property("cast_shadows", True)
     try:
@@ -783,17 +947,26 @@ def build_scene():
         pass
     _log("spawned directional sun light")
 
-    # ── scene capture for screenshots ──
+    # ── camera: becomes the PIE view target, positioned per mode each tick ──
+    cam_loc, cam_rot = _camera_pose(CAMERA_MODE)
+    cam = subsys.spawn_actor_from_class(unreal.CameraActor, cam_loc, cam_rot)
+    cam.set_actor_label("SafeRL_Camera")
+    cam.tags = [CAMERA_TAG]
+
+    # ── scene capture for screenshots (follows the camera at capture time) ──
     cap = subsys.spawn_actor_from_class(
-        unreal.SceneCapture2D, CAM_LOCATION, CAM_ROTATION,
+        unreal.SceneCapture2D, cam_loc, cam_rot,
     )
     cap.set_actor_label("SafeRL_Capture")
     cap.tags = [CAPTURE_TAG]
     cap.capture_component2d.set_editor_property("capture_every_frame", False)
     cap.capture_component2d.set_editor_property("capture_on_movement", False)
 
+    if SPACE_LEVEL:
+        _spawn_space_postfx(subsys, cap)
+
     unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).set_level_viewport_camera_info(
-        CAM_LOCATION, CAM_ROTATION,
+        cam_loc, cam_rot,
     )
     _log(f"scene built (phase 8c real-asset status: {asset_report})")
     asset_report_path = os.path.normpath(os.path.join(_HERE, "..", "..", "phase8c_asset_report.json"))
@@ -813,6 +986,13 @@ def capture_png(game_world, file_name):
             _log("no capture actor in the PIE world; skipping screenshot")
             return False
         comp = actors[0].capture_component2d
+        cam = _state.get("cam_actor")
+        if cam is not None:
+            # capture what the viewport is showing, whichever mode is active
+            actors[0].set_actor_location_and_rotation(
+                cam.get_actor_location(), cam.get_actor_rotation(), False, False)
+            comp.set_editor_property(
+                "fov_angle", cam.camera_component.get_editor_property("field_of_view"))
         comp.set_editor_property("capture_every_frame", False)
         comp.set_editor_property("capture_on_movement", False)
         render_target = unreal.RenderingLibrary.create_render_target2d(
@@ -911,12 +1091,107 @@ def _find_satellite_in_pie():
 
 
 def _find_debris_in_pie(game_world):
-    """Debris actors ordered by label, so index i here is always the same
+    """Debris actors ordered by index, so index i here is always the same
     piece of debris as index i in the published state. get_all_actors_with_tag
-    makes no ordering guarantee, so sorting by our own label is what keeps
-    the mapping stable across ticks."""
+    makes no ordering guarantee. Sorting is numeric on the label's suffix: a
+    plain string sort put "Debris_10" before "Debris_2" once there were more
+    than ten rocks, silently cross-wiring actors to the wrong published
+    positions."""
     actors = unreal.GameplayStatics.get_all_actors_with_tag(game_world, DEBRIS_TAG)
-    return sorted(actors, key=lambda a: a.get_actor_label())
+
+    def index(actor):
+        label = actor.get_actor_label()
+        try:
+            return int(label.rsplit("_", 1)[-1])
+        except ValueError:
+            return 1 << 30
+    return sorted(actors, key=index)
+
+
+def _setup_view_camera(game_world):
+    """Make the camera actor the PIE view target, so the viewport shows the
+    same shot the captures take."""
+    cams = unreal.GameplayStatics.get_all_actors_with_tag(game_world, CAMERA_TAG)
+    if not cams:
+        _log("no camera actor in the PIE world; viewport keeps its default view")
+        return
+    _state["cam_actor"] = cams[0]
+    _state["cam_mode"] = CAMERA_MODE
+    try:
+        pc = unreal.GameplayStatics.get_player_controller(game_world, 0)
+        pc.set_view_target_with_blend(cams[0], 0.0)
+        _log(f"view target -> {cams[0].get_name()} (camera mode {CAMERA_MODE}); "
+             f"switch with: echo chase > {CAMERA_MODE_PATH}")
+    except Exception as e:
+        _log(f"WARNING: could not set PIE view target: {e!r}")
+
+
+def _poll_camera_mode():
+    try:
+        with open(CAMERA_MODE_PATH) as f:
+            mode = f.read().strip().lower()
+    except Exception:
+        return
+    if mode in ("wide", "chase", "fixed") and mode != _state.get("cam_mode"):
+        _state["cam_mode"] = mode
+        _state.pop("chase_pos", None)
+        _log(f"camera mode -> {mode}")
+
+
+def _update_camera():
+    cam = _state.get("cam_actor")
+    bridge = _state.get("bridge")
+    if cam is None or bridge is None:
+        return
+    mode = _state.get("cam_mode", CAMERA_MODE)
+    if mode == "chase":
+        sat = bridge.actor.get_actor_location()
+        d = _state.get("vel_dir") or (1.0, 0.0, 0.0)
+        want = (sat.x - d[0] * CHASE_BACK_CM,
+                sat.y - d[1] * CHASE_BACK_CM,
+                sat.z - d[2] * CHASE_BACK_CM + CHASE_UP_CM)
+        cur = _state.get("chase_pos") or want
+        pos = tuple(c + (w - c) * CHASE_LERP for c, w in zip(cur, want))
+        _state["chase_pos"] = pos
+        loc = unreal.Vector(*pos)
+        cam.set_actor_location_and_rotation(
+            loc, unreal.MathLibrary.find_look_at_rotation(loc, sat), False, False)
+    elif _state.get("cam_applied_mode") != mode:
+        loc, rot = _camera_pose(mode)
+        cam.set_actor_location_and_rotation(loc, rot, False, False)
+    _state["cam_applied_mode"] = mode
+
+
+def _update_heading(actor, vel):
+    """Smoothed velocity direction, for the satellite's heading and the chase
+    camera. Visual only: the env has no attitude."""
+    if not vel:
+        return
+    speed = math.sqrt(sum(v * v for v in vel))
+    if speed < 0.2:
+        return
+    v = [c / speed for c in vel]
+    old = _state.get("vel_dir")
+    if old is None:
+        new = v
+    else:
+        mix = [0.85 * o + 0.15 * n for o, n in zip(old, v)]
+        norm = math.sqrt(sum(c * c for c in mix)) or 1.0
+        new = [c / norm for c in mix]
+    _state["vel_dir"] = new
+    if DIMS == 3:
+        actor.set_actor_rotation(unreal.MathLibrary.find_look_at_rotation(
+            unreal.Vector(0.0, 0.0, 0.0), unreal.Vector(*new)), False)
+
+
+def _tumble_debris(dt):
+    """Slow per-rock spin in 3D. Visual only: the env's debris don't rotate."""
+    if DIMS != 3:
+        return
+    for i, actor in enumerate(_state.get("live_debris_actors") or []):
+        actor.add_actor_local_rotation(unreal.Rotator(
+            ((i * 53) % 40 - 20) * dt, ((i * 29) % 30 - 15) * dt,
+            ((i * 71) % 50 - 25) * dt), False, False)
 
 
 def _live_mirror_tick():
@@ -941,9 +1216,19 @@ def _live_mirror_tick():
     agent = frame.get("agent")
     if agent:
         bridge.actor.set_actor_location(_env_to_world(agent), False, False)
+    _update_heading(bridge.actor, frame.get("agent_vel"))
 
     debris_actors = st.get("live_debris_actors") or []
-    for i, pos in enumerate(frame.get("debris", [])):
+    published = frame.get("debris", [])
+    if len(published) != len(debris_actors) and not st.get("live_count_warned"):
+        st["live_count_warned"] = True
+        _log(f"WARNING: bridge publishes {len(published)} debris but the scene has "
+             f"{len(debris_actors)} -- launch both sides with the same config "
+             f"(run_ue_demo.sh --config does)")
+    if frame.get("dims", DIMS) != DIMS and not st.get("live_dims_warned"):
+        st["live_dims_warned"] = True
+        _log(f"WARNING: bridge is {frame.get('dims')}D but the scene was built {DIMS}D")
+    for i, pos in enumerate(published):
         if i < len(debris_actors):
             debris_actors[i].set_actor_location(_env_to_world(pos), False, False)
 
@@ -1022,6 +1307,9 @@ def _on_tick(delta_seconds):
         if _state["phase"] == "done":
             return
         _state["ticks"] += 1
+        _state["dt"] = float(delta_seconds)
+        if _state.get("cam_actor") is not None and _state["ticks"] % 10 == 0:
+            _poll_camera_mode()
 
         if _state["phase"] == "boot":
             if _state["ticks"] < BOOT_TICKS:
@@ -1041,6 +1329,8 @@ def _on_tick(delta_seconds):
             # actor out from under it.
             _state["phase"] = "building"
             _disable_background_throttle()
+            if SPACE_LEVEL:
+                _ensure_space_level()
             build_scene()
             unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_request_begin_play()
             _log("PIE requested")
@@ -1087,6 +1377,7 @@ def _on_tick(delta_seconds):
             _state["bridge"].reset()
             if UNCAP_FRAMERATE:
                 _uncap_framerate(game_world)
+            _setup_view_camera(game_world)
 
             if LIVE_POLICY:
                 _state["live_debris_actors"] = _find_debris_in_pie(game_world)
@@ -1107,12 +1398,15 @@ def _on_tick(delta_seconds):
 
         if _state["phase"] == "live_mirror":
             _live_mirror_tick()
+            _tumble_debris(_state["dt"])
+            _update_camera()
             return
 
         if _state["phase"] == "posing":
             bridge = _state["bridge"]
             _state["pose_ticks"] += 1
             bridge.step(bridge.action_toward_goal())
+            _update_camera()
             if _state["pose_ticks"] == 45:
                 capture_png(bridge.world, "pie_session_midrun.png")
             elif _state["pose_ticks"] >= 90:
@@ -1132,6 +1426,7 @@ def _on_tick(delta_seconds):
                 _state["arrivals"] += 1
                 bridge.reset()
 
+        _update_camera()
         if _state["count"] % 100 == 0:
             _log(f"step {_state['count']}/{NUM_STEPS} satellite at {obs['position']}")
 
