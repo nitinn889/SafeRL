@@ -1,3 +1,175 @@
+# SafeRL — shielded PPO for satellite navigation through a debris field
+
+A satellite learns to cross a field of drifting debris to reach a goal, with a
+safety shield that can override any action it judges unsafe. Training and
+physics run in PyBullet; Unreal Engine renders the result. The interesting part
+is the tension between the two halves: the shield makes the agent *safe* for
+free, and the constrained-PPO layer then has to teach the policy to stop
+*needing* it — which is the part that does not come for free.
+
+- **Hard layer** — an analytic shield that propagates every candidate action over
+  a 20-step horizon and picks the least-restrictive safe one. 0 collisions in
+  150/150 constructed head-on encounters that kill an unshielded agent 150/150.
+- **Soft layer** — PPO with a separate cost critic and a Lagrange multiplier, so
+  the policy is penalised for triggering the shield rather than only protected
+  by it.
+- **Partial observability** — the policy sees hazards within 6.0 units; the
+  shield keeps a privileged full view, like a dedicated collision-avoidance
+  system with its own sensor path.
+
+![the trained policy flying the debris field in Unreal](ue_spike/demo_capture/saferl_demo.gif)
+
+## Result
+
+Reported checkpoint: `saferl/eval/phase9/saferl_phase9_best.zip` (450k steps,
+selected by phase 9's probe/plateau process). 500 episodes, seed 42,
+deterministic, limited sensing.
+
+| Eval condition | Goal rate | Intervention rate | Collisions |
+|---|---|---|---|
+| **Mixed-curriculum** (config default) | **90.8%** | **6.79%** | 0 |
+| **Full fixed 5-hazard** (what the demo shows) | **83.8%** | **6.47%** | 0 |
+
+Both numbers are real and neither supersedes the other — they measure different
+difficulty distributions, and phase 10 found they differ because the eval
+protocol silently inherits the *training* curriculum (see Limitations). If you
+want the one that matches the scene in the animation above, it is **83.8%**.
+
+Zero collisions across every evaluation in the project's history. That is the
+shield doing its job, and it is the one result that never wavered.
+
+**The 5% intervention target was not reached, and is probably not reachable
+under this architecture.** The constraint asked the policy to trigger the shield
+on at most 5% of steps. It settled at a stable 6–7% instead. Through phase 9's
+700k-step run the Lagrange multiplier climbed monotonically, 1.79 → 2.42, with
+no sign of levelling off — dual ascent still pushing, the policy not moving. The
+honest reading is an equilibrium a couple of points short of the target, not a
+target met and not a transient the next run would fix.
+
+For reference, the 700k final checkpoint (where training stopped on plateau
+detection) measures 75.2% / 2.73% mixed-curriculum and 65.6% / 2.67% full
+5-hazard — better at satisfying the constraint, meaningfully worse at the task.
+The 450k checkpoint is the reported one.
+
+## Run it
+
+**The visual demo** (Unreal + the trained policy, live):
+
+```bash
+./run_ue_demo.sh
+```
+
+One command: it mounts the engine drive if needed, launches the editor, waits
+for the PIE session, then runs the 450k policy with per-episode metrics
+streaming to your terminal. Ctrl-C stops both. The policy runs in a separate
+process and Unreal mirrors its state — UE 5.8 embeds Python 3.11, this venv is
+3.14, and torch/SB3 are interpreter-locked, so the policy cannot run inside the
+editor. UE renders; it does not simulate.
+
+**The fast check** (no Unreal needed, a few seconds):
+
+```bash
+.venv/bin/python -m saferl.demo.run_demo --episodes 10
+```
+
+**Reproduce the reported numbers:**
+
+```bash
+# mixed-curriculum (90.8% / 6.79%)
+python -m saferl.eval.evaluate --checkpoint saferl/eval/phase9/saferl_phase9_best.zip
+# full fixed 5-hazard (83.8% / 6.47%)
+python -m saferl.eval.evaluate --checkpoint saferl/eval/phase9/saferl_phase9_best.zip --no-curriculum
+```
+
+**Training curves** (historical, from the phase 9 run — not a live dashboard):
+
+```bash
+tensorboard --logdir saferl/eval/phase9/tb/
+```
+
+**Tests:**
+
+```bash
+pip install -r requirements.txt
+pytest tests/          # 40 tests
+```
+
+## Architecture at a glance
+
+| Module | What it does |
+|---|---|
+| `saferl/env/base_env.py` | `SafeNav3DEnv` — PyBullet env, 39-wide obs, drifting debris, sensor-range limiting |
+| `saferl/shield/safety_shield.py` | `SafetyShield` (forward-model safety check, least-restrictive substitution) + `ShieldedEnv` wrapper |
+| `saferl/training/dual_critic.py` | `ConstrainedPPO` + `DualCriticPolicy` — separate cost critic, Lagrangian dual ascent |
+| `saferl/training/train_phase9.py` | Convergence-stopped training run with probe-based checkpoint selection |
+| `saferl/eval/evaluate.py` | The authoritative eval protocol (500 ep, seed 42, deterministic) |
+| `saferl/demo/run_demo.py` | Fast headless demo |
+| `saferl/demo/live_policy_bridge.py` | Runs the real env/shield/policy and publishes state for UE to mirror |
+| `ue_spike/` | Unreal project — scene build, PIE session driver, sourced assets |
+| `saferl/configs/default.yaml` | Every tunable, with the reasoning for each value written next to it |
+
+## Limitations and honest caveats
+
+1. **The 5% intervention target was not met** (6.79% / 6.47% measured; λ still
+   climbing at 700k). Detailed above.
+2. **The eval protocol inherits the training curriculum.** `evaluate.py` reads
+   `curriculum: true` from config, and a fresh env restarts the ramp at episode
+   0 — `num_hazards = min(max_hazards, 1 + episode_count // 50)` — so a
+   500-episode run spends its first 200 episodes at 1–4 hazards. Roughly 40% of
+   every figure published before phase 10 was measured below full difficulty.
+   Found in phase 10; both conditions are now reported side by side, and
+   `--no-curriculum` plus a condition stamp in `eval_summary.csv` exist so it
+   cannot be misread again. Nothing was wrong with the old numbers *as
+   measured* — they were just labelled as if they meant something slightly
+   broader than they did.
+3. **Probe-vs-held-out variance is large.** Phase 9 selected its checkpoint on a
+   100-episode probe that read 100%; the 500-episode held-out eval of the same
+   weights read 90.8%. A 9pp gap is not noise at that sample size, and it means
+   probe-based selection is optimistic by construction.
+4. **Phase 7's original improvement claim was not apples-to-apples.** It compared
+   training-time averages against phase 6b's training-time averages. Phase 8
+   re-measured both under the real protocol and the improvement held up (66.6%
+   → 89.2% under matched conditions), but the originally *reported* delta was
+   not a like-for-like number. The phase 7 and 8 sections below preserve both.
+5. **Unreal is a renderer, not a simulator, and that was measured.** Phase 4
+   found UE's step rate ceilings at ~119 steps/sec regardless of batching —
+   world ticks stayed flat at 88–119/s whether stepping 1 or 50 times per frame.
+   PyBullet does ~1090/s. Training therefore runs in PyBullet; UE renders.
+6. **Two known cosmetic issues in the Unreal scene.** One of five rock slots
+   renders as a plain sphere despite mesh path, vertex count, material and world
+   position all checking out (phase 8c eliminated 7 hypotheses; it is visible in
+   the demo animation). And the NASA starmap dome renders but reads as dark
+   grain rather than stars — phase 10 traced this to scale, a 4K equirectangular
+   map over a 50,000-unit dome putting stars below one rendered pixel.
+7. **The scene has a ground plane.** The env inherits one from PyBullet, so the
+   "satellite" flies over a floor rather than through free space. Physically odd
+   for the premise; it has never affected the RL result, which is why it has
+   never been changed.
+
+## Possible future work
+
+Not undertaken, and listed so they are not mistaken for gaps that were missed:
+reward shaping that credits clean near-miss avoidance (the policy currently gets
+no credit for dodging well, only penalties for needing the shield); revisiting
+the 5% target with a tighter constraint curriculum or a larger policy, since the
+evidence says the current pairing has plateaued; a composite
+goal-rate-and-intervention checkpoint-selection criterion instead of goal rate
+alone; and a higher-resolution starmap if the sky ever needs to read as stars.
+
+---
+
+# Project history
+
+Everything below is the phase-by-phase record, written at the time each phase
+ran and left unedited since — including the phase 6 collapse and its phase 6b
+fix, and the phase 6b/7 eval discrepancy and its phase 8 resolution. It is kept
+as-is deliberately: the corrections are the most useful part.
+
+The section immediately following is the original phase-1 README, superseded by
+the summary above but preserved for the same reason.
+
+---
+
 This repository contains a Safe Reinforcement Learning (Safe RL) implementation using Probability Shields in a 3D navigation environment. The agent is trained using Proximal Policy Optimization (PPO) to navigate safely while avoiding hazards.
 
 📖 Project Overview
@@ -1970,3 +2142,137 @@ All **40 tests pass** (unchanged from phase 8). Added:
    detection), so checkpoint selection should be treated with the variance
    caveat above. The held-out eval protocol (`evaluate()` with seed 42) is
    separate.
+
+---
+
+## Phase 10 (2026-09-14): Packaging, demo build, and closeout
+
+The final phase of the original ten. Scope was packaging and closure: no new RL
+features, no new shield logic, no new training runs.
+
+### The eval condition nobody had measured
+
+Phase 9's headline, 90.8% / 6.79%, belongs to the 450k checkpoint
+(`saferl_phase9_best.zip`) — a labelling error in an earlier prompt had attached
+it to the 700k one. Correcting that exposed something larger.
+
+`evaluate.py` reads `curriculum: true` straight from the config, and a *fresh*
+env restarts that ramp at episode 0: `num_hazards = min(max_hazards, 1 +
+episode_count // 50)`. A 500-episode evaluation therefore spends its first 200
+episodes facing 1–4 hazards and only its last 300 at the full 5. Roughly 40% of
+every figure this project has published was measured on a scenario easier than
+the one the demo puts on screen — including the headline.
+
+So the missing measurement was run. All four numbers, 500 episodes, seed 42,
+deterministic, limited sensing, **0 collisions in every one**:
+
+| Checkpoint | Mixed-curriculum | Full fixed 5-hazard | Δ goal |
+|---|---|---|---|
+| **450k** (`saferl_phase9_best.zip`, reported) | **90.8% / 6.79%** | **83.8% / 6.47%** | −7.0pp |
+| 700k (`saferl_phase9.zip`, training stop) | 75.2% / 2.73% | 65.6% / 2.67% | −9.6pp |
+
+450k is better at the task in both conditions and degrades less under
+difficulty. 700k is better at satisfying the constraint in both. (An earlier
+62.7% figure for 700k full-difficulty came from a 150-episode run; 65.6% is the
+matched 500-episode one.)
+
+`--no-curriculum` now exists to measure full fixed difficulty, and every
+`eval_summary.csv` carries the condition (`curriculum`, `max_hazards`) so a
+stored result can never again be read without knowing what produced it. Default
+behaviour is unchanged, so every prior figure still reproduces.
+
+The intervention rate barely moves between conditions — 6.79% vs 6.47% — which
+is the clearest evidence yet that the 6–7% equilibrium is a property of the
+policy rather than of the difficulty it was measured at.
+
+### The demo
+
+`./run_ue_demo.sh` is one command: it mounts the engine drive if needed,
+launches the editor, waits for the PIE session to reach live-mirror mode, then
+runs the 450k policy with per-episode metrics streaming to the terminal. Full
+automation turned out to be practical after all — the two things that made it
+look risky are both handled. Phase 3's `-ExecutePythonScript` problem does not
+apply because the session arms from `init_unreal.py`, and the engine drive
+mounts via `udisksctl` without sudo.
+
+It was run end to end to produce the capture, so the documented path is tested
+rather than asserted. That run scored **9/11 goals (81.8%), 0 collisions** at
+full 5-hazard difficulty — consistent with the 83.8% measured over 500 episodes,
+which is the reassuring direction for a number arrived at two different ways.
+
+The capstone artifact is [`ue_spike/demo_capture/saferl_demo.gif`](ue_spike/demo_capture/saferl_demo.gif):
+24 frames of the trained policy flying the debris field in the phase 8c scene,
+with its real per-step metrics burned into each frame. The bridge's console log
+from that run is preserved alongside it. This is the first point in the project
+where the RL result and the visual result are the same artifact.
+
+`saferl/demo/run_demo.py` was rewritten as the fast headless path. The phase 2
+version ran the **bare env with no SafetyShield** — it exercised none of the
+safety layer this project exists to build — defaulted to a `saferl_model.zip`
+that no longer exists, opened a GUI window unconditionally (which hangs on this
+host's Wayland session), and printed nothing but "Demo finished".
+
+### Two bugs the demo run surfaced
+
+The bridge's atomic publish used a single fixed `<state>.tmp` name, so two
+bridges pointed at one state file raced — A writes tmp, B writes tmp, A's
+`os.replace` consumes it, B's dies with `FileNotFoundError`. That killed a demo
+run when a previous bridge survived a `pkill`. The scratch name now carries the
+PID, and `run_ue_demo.sh` refuses to start alongside an existing bridge.
+
+Chasing phase 8c's "skybox applied but not strongly visible" produced a precise
+answer. It is not material brightness: at the demo camera's −34.5° pitch the
+ground plane fills the frame edge to edge and the horizon sits above the top of
+the image, so **there is no sky in shot at all**. An establishing shot with the
+camera pitched up to −8° ([`establishing_shot_sky.png`](ue_spike/demo_capture/establishing_shot_sky.png))
+confirms the dome renders with the real NASA texture on it — visible as a
+grained band with its UV seam. The stars still do not read, and the likely
+reason is scale: a 4096×2048 equirectangular map stretched over a 50,000-unit
+dome puts individual stars below one rendered pixel, where filtering averages
+them into dark noise. Fixing that means a higher-resolution starmap (NASA
+publishes up to 64K), a smaller dome, or a point-star shader — none of which is
+packaging work, so it is documented rather than done.
+
+The other known 8c issue, one rock slot rendering as a plain sphere, is still
+present, still cosmetic, and visible in the animation. Not chased further, per
+its seven-hypotheses-eliminated history.
+
+### Final sanity pass
+
+- **Tests: 40/40**, run both in the project venv and in a throwaway venv built
+  from nothing but `requirements.txt`.
+- **Fresh-environment install: verified literally, not assumed.** A clean
+  `python -m venv` + `pip install -r requirements.txt` installs, passes all 40
+  tests, and runs `saferl.demo.run_demo` reproducing episode-for-episode
+  identical results to the development venv.
+- **Checkpoints are now committed.** They never had been, so a fresh clone could
+  not have run either demo or reproduced any reported number. 1.3MB total.
+- **Config confirmed** against what actually produced the reported checkpoint:
+  `force_mag: 48.0`, `lookahead_steps: 20`, `sensor_range: 6.0`,
+  `target_rate: 0.05`, `lambda_lr: 0.1`, `lambda_max: 5.0`. Two bookkeeping
+  fixes: `training.timesteps: 30000` is the phase-2 script's default and is now
+  annotated as *not* how the reported checkpoint was trained, and the dead
+  `demo:` block was removed once the `run_demo` rewrite dropped its last reader.
+- **TensorBoard path fix confirmed still correct** — `saferl/eval/phase9/tb/`,
+  32 scalars, 353 points spanning steps 2,048–700,000. It shows the historical
+  phase 9 training run; it is not a live-inference dashboard and is not
+  described as one. The live per-episode console metrics from the bridge serve
+  that purpose instead.
+- **Git history reviewed, not rewritten.**
+
+### Closing
+
+This completes the original ten-phase plan, with phase 6b as its one mid-course
+correction — the constrained-PPO collapse that the two-critic architecture
+fixed. The record below is unedited, including the phases that got things wrong
+and the phases that caught them.
+
+The final authoritative result, stated once more plainly: the 450k checkpoint
+reaches **90.8% goal / 6.79% intervention** under the mixed-curriculum eval and
+**83.8% goal / 6.47% intervention** at full fixed 5-hazard difficulty, which is
+the condition the demo shows — **0 collisions** in both, and in every evaluation
+this project has ever run. The 5% intervention target was **not** reached; 6–7%
+is a stable equilibrium that came up short, with the Lagrange multiplier still
+climbing (1.79 → 2.42) when training stopped. That shortfall is a measured
+result, not a rounding error, and it is the honest headline alongside the
+goal-rate figures.
