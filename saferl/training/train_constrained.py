@@ -68,6 +68,7 @@ class Phase6bCallback(BaseCallback):
                 reached_goal=int(self._reward > 0),
                 lam=round(float(lam), 4),
                 target_rate=round(float(target), 4),
+                goal_fraction=round(float(info.get("goal_fraction", 1.0)), 3),
             ))
             self._reset_acc()
         return True
@@ -154,7 +155,8 @@ def summarise(name, rows, fraction=0.2):
     }
 
 
-def plot_phase6b(rows, output_path):
+def plot_phase6b(rows, output_path,
+                 title="Phase 6b: two-critic constrained PPO (warm-started)"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -162,7 +164,7 @@ def plot_phase6b(rows, output_path):
     sns.set_theme(style="darkgrid")
 
     fig, axes = plt.subplots(2, 3, figsize=(20, 10))
-    fig.suptitle("Phase 6b: two-critic constrained PPO (warm-started)",
+    fig.suptitle(title,
                  fontsize=14, fontweight="bold")
 
     def smooth(v, w=31):
@@ -185,14 +187,29 @@ def plot_phase6b(rows, output_path):
         ax.set_title(title)
         ax.set_xlabel("timestep")
 
-    # Goal rate (cumulative)
+    # Goal rate: cumulative, plus a rolling window so late learning is not
+    # buried under early failures. Under a goal curriculum the goal's
+    # distance fraction is overlaid -- training goal rate only means the real
+    # task where that line has reached 1.0.
     ax = axes[1, 2]
-    cum_goals = np.cumsum([r["reached_goal"] for r in rows])
-    cum_rate = cum_goals / np.arange(1, len(rows) + 1) * 100
-    ax.plot(ts, cum_rate, color="seagreen")
-    ax.set_title("Cumulative goal rate %")
+    goals = [r["reached_goal"] for r in rows]
+    cum_rate = np.cumsum(goals) / np.arange(1, len(rows) + 1) * 100
+    ax.plot(ts, cum_rate, color="seagreen", label="cumulative")
+    roll = smooth(goals, w=50) * 100
+    ax.plot(ts[len(ts) - len(roll):], roll, color="darkgreen", alpha=0.5,
+            label="rolling 50 ep")
+    ax.set_title("Goal rate %")
     ax.set_xlabel("timestep")
     ax.set_ylabel("%")
+    ax.legend(loc="upper left")
+    fracs = [r.get("goal_fraction", 1.0) for r in rows]
+    if min(fracs) < 1.0:
+        ax2 = ax.twinx()
+        ax2.plot(ts, fracs, color="slateblue", label="goal distance fraction")
+        ax2.set_ylim(0, 1.05)
+        ax2.set_ylabel("goal distance fraction")
+        ax2.grid(False)
+        ax2.legend(loc="lower right")
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=140)
@@ -294,7 +311,8 @@ def main():
         w.writeheader()
         w.writerow(s)
 
-    plot_phase6b(cb.rows, out / "phase6b_constrained.png")
+    plot_kw = {} if args.config is None else {"title": f"{args.model_name} ({args.config})"}
+    plot_phase6b(cb.rows, out / "phase6b_constrained.png", **plot_kw)
     venv.close()
 
 

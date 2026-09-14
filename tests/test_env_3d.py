@@ -211,3 +211,48 @@ def test_ppo_accepts_the_3d_spaces():
     action, _ = model.predict(obs, deterministic=True)
     assert base.action_space.contains(int(action))
     shielded.close()
+
+
+# ── goal curriculum ────────────────────────────────────────────────────────
+
+def _reach_goal(e):
+    """Put the agent on the goal and take one step: a genuine goal hit."""
+    p.resetBasePositionAndOrientation(e.agent_id, e.goal_pos.tolist(),
+                                      [0, 0, 0, 1], physicsClientId=e._client)
+    _, reward, done, _, info = e.step(0)
+    assert done and reward > 0
+    return info
+
+
+def test_goal_curriculum_needs_curriculum_on_too():
+    e = make_env(goal_curriculum=True)          # make_env sets curriculum=False
+    e.reset()
+    np.testing.assert_array_equal(e.goal_pos, [9, 9, 9])
+    assert e.goal_fraction == 1.0
+    e.close()
+
+
+def test_goal_curriculum_starts_near_and_promotes_on_success():
+    env_cfg = CFG["env"]
+    frac, step = env_cfg["goal_start_fraction"], env_cfg["goal_fraction_step"]
+    e = make_env(curriculum=True, goal_curriculum=True)
+    e.reset()
+    np.testing.assert_allclose(e.goal_pos, np.full(3, 9.0 * frac), atol=1e-5)
+    for _ in range(env_cfg["goal_promote_window"]):
+        assert _reach_goal(e)["goal_fraction"] == pytest.approx(frac)
+        e.reset()
+    assert e.goal_fraction == pytest.approx(frac + step)
+    np.testing.assert_allclose(e.goal_pos, np.full(3, 9.0 * (frac + step)), atol=1e-5)
+    e.close()
+
+
+def test_goal_curriculum_holds_while_the_policy_fails():
+    e = make_env(curriculum=True, goal_curriculum=True, max_episode_steps=2)
+    e.reset()
+    for _ in range(2 * CFG["env"]["goal_promote_window"]):
+        done = truncated = False
+        while not (done or truncated):
+            _, _, done, truncated, _ = e.step(0)
+        e.reset()
+    assert e.goal_fraction == pytest.approx(CFG["env"]["goal_start_fraction"])
+    e.close()

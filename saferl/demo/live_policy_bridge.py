@@ -89,6 +89,7 @@ def main():
     env_cfg = dict(cfg["env"])
     if not args.curriculum:
         env_cfg["curriculum"] = False
+    env_cfg["goal_curriculum"] = False   # the UE scene draws the real goal
 
     np.random.seed(args.seed)
 

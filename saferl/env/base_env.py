@@ -4,6 +4,8 @@ Each instance owns its own PyBullet connection (p.DIRECT for training,
 p.GUI for demos) so multiple envs never collide on a single shared
 connection.
 """
+from collections import deque
+
 import numpy as np
 import pybullet as p
 import pybullet_data
@@ -60,7 +62,10 @@ class SafeNav3DEnv(gym.Env):
                  sim_substeps=10, agent_friction=0.0, max_episode_steps=1000,
                  debris_min_speed=0.3, debris_max_speed=1.2,
                  debris_speed_ramp_episodes=200, bounds_margin=5.0,
-                 out_of_bounds_penalty=-100.0, sensor_range=None, dims=2):
+                 out_of_bounds_penalty=-100.0, sensor_range=None, dims=2,
+                 goal_curriculum=False, goal_start_fraction=0.2,
+                 goal_fraction_step=0.1, goal_promote_window=20,
+                 goal_promote_rate=0.6):
         super().__init__()
         # dims=2 is the planar env every result through phase 10 was produced
         # on: gravity, a ground plane, x/y thrust. dims=3 is free flight -- no
@@ -101,7 +106,43 @@ class SafeNav3DEnv(gym.Env):
             dtype=np.float32
         )
         goal_z = size - 1 if self.dims == 3 else 0.5
-        self.goal_pos = np.array([size - 1, size - 1, goal_z], dtype=np.float32)
+        self._full_goal = np.array([size - 1, size - 1, goal_z], dtype=np.float32)
+        self.goal_pos = self._full_goal.copy()
+        # success-gated goal curriculum; see default.yaml. Off, the goal is
+        # always the real one and no state below is ever consulted.
+        self.goal_curriculum = goal_curriculum
+        self.goal_start_fraction = goal_start_fraction
+        self.goal_fraction_step = goal_fraction_step
+        self.goal_promote_window = goal_promote_window
+        self.goal_promote_rate = goal_promote_rate
+        self.goal_fraction = goal_start_fraction if self._goal_curriculum_on() else 1.0
+        self._recent_goals = deque(maxlen=goal_promote_window)
+        self._reached_goal = False
+
+    def _goal_curriculum_on(self):
+        return bool(self.curriculum and self.goal_curriculum)
+
+    def _place_goal(self, start):
+        """Score the episode that just ended, promote the goal once the recent
+        success rate clears the bar, and place it that fraction of the way
+        from start to the real goal. With the curriculum off this is exactly
+        the fixed goal every earlier result used."""
+        if not self._goal_curriculum_on():
+            self.goal_fraction = 1.0
+            self.goal_pos = self._full_goal.copy()
+            return
+        if self._step_count > 0:
+            self._recent_goals.append(1.0 if self._reached_goal else 0.0)
+            if (self.goal_fraction < 1.0
+                    and len(self._recent_goals) == self.goal_promote_window
+                    and np.mean(self._recent_goals) >= self.goal_promote_rate):
+                self.goal_fraction = min(
+                    1.0, round(self.goal_fraction + self.goal_fraction_step, 6))
+                self._recent_goals.clear()
+        self._reached_goal = False
+        start = np.asarray(start, dtype=np.float32)
+        self.goal_pos = (start + self.goal_fraction * (self._full_goal - start)
+                         ).astype(np.float32)
 
     # ------ PyBullet lifecycle ------
     def _connect(self):
@@ -155,6 +196,7 @@ class SafeNav3DEnv(gym.Env):
                          linearDamping=0.0, angularDamping=0.0,
                          physicsClientId=cid)
 
+        self._place_goal(start)
         goal_vis = p.createVisualShape(
             p.GEOM_SPHERE, radius=0.6, rgbaColor=[0, 1, 0, 0.5],
             physicsClientId=cid
@@ -308,6 +350,7 @@ class SafeNav3DEnv(gym.Env):
         if np.linalg.norm(obs[0:3] - self.goal_pos) < self.goal_threshold:
             reward += 100
             done = True
+            self._reached_goal = True
 
         if not done:
             for h_pos in self.hazard_positions:
@@ -329,4 +372,5 @@ class SafeNav3DEnv(gym.Env):
 
         truncated = (not done) and self._step_count >= self.max_episode_steps
 
-        return obs, reward, done, truncated, {"cost": cost, "out_of_bounds": out_of_bounds}
+        return obs, reward, done, truncated, {"cost": cost, "out_of_bounds": out_of_bounds,
+                                              "goal_fraction": self.goal_fraction}

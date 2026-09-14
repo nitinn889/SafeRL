@@ -52,6 +52,18 @@ env:
   # -- it always sees true hazard state regardless of range (see phase 7).
   # null = unlimited (god's-eye view, the pre-phase-7 default).
   sensor_range: 6.0
+  # Success-gated goal curriculum (off here; space3d.yaml turns it on). Active
+  # only when `curriculum` is also on. The goal starts goal_start_fraction of
+  # the way along the start->goal line and moves goal_fraction_step further
+  # each time the last goal_promote_window episodes reach it at
+  # goal_promote_rate or better, until it sits at the real goal. Gated on
+  # success rather than an episode count so it cannot outrun the policy.
+  # Evaluation always forces it off (saferl/eval/evaluate.py).
+  goal_curriculum: false
+  goal_start_fraction: 0.2
+  goal_fraction_step: 0.1
+  goal_promote_window: 20
+  goal_promote_rate: 0.6
 
 shield:
   safe_dist: 2.2

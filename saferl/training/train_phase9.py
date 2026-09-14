@@ -96,6 +96,7 @@ class Phase9Callback(BaseCallback):
             reached_goal=reached_goal,
             lam=round(lam, 4),
             target_rate=round(target, 4),
+            goal_fraction=round(float(info.get("goal_fraction", 1.0)), 3),
         ))
 
         self._goals.append(reached_goal)

@@ -16,3 +16,10 @@ env:
   # is 0.24 per hazard, so 12 gives the same ~2.8. Five would leave the volume
   # nearly empty and the shield rarely exercised.
   max_hazards: 12
+  # Measured necessity, not taste. From scratch with the fixed far-corner goal
+  # (a 1-unit sphere 15.6 units away in a 1000 unit^3 volume), PPO reached it
+  # in 7 of 703 training episodes and settled on waiting out the 1000-step
+  # clock inside the field: 0/100 at the stage A gate. So the goal starts
+  # close and moves out as the policy reaches it. See default.yaml; every
+  # evaluation still uses the real goal.
+  goal_curriculum: true

@@ -58,6 +58,10 @@ def evaluate_model(model, n_episodes: int = 500, seed: int = 42,
 
     try:
         cfg = load_config(config_path)
+        # Evaluation always measures the real goal. A goal curriculum is a
+        # training aid; letting it move the goal here would score a checkpoint
+        # on easier tasks than the one being reported.
+        cfg["env"]["goal_curriculum"] = False
         if sensor_range is not None:
             cfg["env"]["sensor_range"] = sensor_range
 
@@ -100,6 +104,10 @@ def evaluate(checkpoint_path: str, n_episodes: int = 500, seed: int = 42,
     measure full fixed difficulty. Phase 10 reports both, labelled.
     """
     cfg = load_config(config_path)
+    # Evaluation always measures the real goal. A goal curriculum is a
+    # training aid; letting it move the goal here would score a checkpoint
+    # on easier tasks than the one being reported.
+    cfg["env"]["goal_curriculum"] = False
     if sensor_range is not None:
         cfg["env"]["sensor_range"] = sensor_range
     if curriculum is not None:
