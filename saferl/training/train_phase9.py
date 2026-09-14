@@ -303,7 +303,8 @@ def summarise(name, rows, fraction=0.2):
     }
 
 
-def plot_phase9(rows, probes, output_path):
+def plot_phase9(rows, probes, output_path,
+                title="Phase 9: extended training from phase 7 (limited sensing)"):
     """Static end-of-run summary. Retained alongside TensorBoard, not replaced."""
     import matplotlib
     matplotlib.use("Agg")
@@ -312,7 +313,7 @@ def plot_phase9(rows, probes, output_path):
     sns.set_theme(style="darkgrid")
 
     fig, axes = plt.subplots(2, 3, figsize=(20, 10))
-    fig.suptitle("Phase 9: extended training from phase 7 (limited sensing)",
+    fig.suptitle(title,
                  fontsize=14, fontweight="bold")
 
     def smooth(v, w=51):
@@ -467,7 +468,9 @@ def main():
         w.writeheader()
         w.writerow(s)
 
-    plot_phase9(ep_cb.rows, conv_cb.probes, out / f"{args.run_name}_training.png")
+    plot_kw = {} if args.run_name == "phase9" else {
+        "title": f"{args.run_name}: convergence-stopped run ({args.config or 'default.yaml'})"}
+    plot_phase9(ep_cb.rows, conv_cb.probes, out / f"{args.run_name}_training.png", **plot_kw)
     venv.close()
 
 
