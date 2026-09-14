@@ -1,0 +1,13 @@
+pybullet build time: Sep 11 2026 21:05:26
+Evaluating: saferl/eval/space3d/long/saferl_space3d.zip
+  episodes=500  seed=42  deterministic=True  sensor_range=None
+  difficulty: full fixed (curriculum off)
+
+Results (500 episodes, deterministic, seed=42):
+  checkpoint: saferl/eval/space3d/long/saferl_space3d.zip
+  md5:        bf5b69b8056f067324d5c33d1f1fd7d0
+  goal rate:         76.6% (383/500)
+  intervention rate: 9.54% (24451/256241)
+  collisions:        0
+
+[exited with code 0]
