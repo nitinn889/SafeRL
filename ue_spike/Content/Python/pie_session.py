@@ -91,8 +91,24 @@ FORCE_ACCEL = 400.0
 MAX_SPEED = 900.0
 GOAL_RADIUS = 1.0 * SCALE
 
-CAM_LOCATION = unreal.Vector(2600.0, -900.0, 1800.0)
-CAM_ROTATION = unreal.Rotator(0.0, -34.5, 133.4)
+# Camera. The defaults are phase 3's framing, kept because they show the
+# debris field and the agent's path clearly -- that is what the demo is of.
+# A consequence, diagnosed in phase 10: at pitch -34.5 the ground plane
+# fills the frame edge to edge and the horizon sits above the top of the
+# image, so *no sky is in shot at all*. That, not material brightness, is
+# why the real NASA starmap never showed up in phase 8c's captures. The
+# overrides below exist to take an establishing shot that does include sky,
+# without disturbing the framing the demo itself uses.
+CAM_LOCATION = unreal.Vector(
+    float(os.environ.get("SAFERL_CAM_X", "2600.0")),
+    float(os.environ.get("SAFERL_CAM_Y", "-900.0")),
+    float(os.environ.get("SAFERL_CAM_Z", "1800.0")),
+)
+CAM_ROTATION = unreal.Rotator(
+    0.0,
+    float(os.environ.get("SAFERL_CAM_PITCH", "-34.5")),
+    float(os.environ.get("SAFERL_CAM_YAW", "133.4")),
+)
 ACTION_TABLE = {
     0: (0.0, FORCE_ACCEL),
     1: (0.0, -FORCE_ACCEL),
@@ -122,6 +138,9 @@ LIVE_STATE_NAME = os.environ.get("SAFERL_LIVE_STATE", "live_policy_state.json")
 # re-render is expensive (phase 3 measured it dragging the loop from ~119 to
 # ~6 steps/sec when left on every frame), so this is deliberately sparse.
 LIVE_CAPTURE_EVERY = int(os.environ.get("SAFERL_LIVE_CAPTURE_EVERY", "450"))
+# >0 switches capture to a numbered sequence of this many frames (plus a
+# metrics sidecar), for assembling the demo animation. 0 = alternating slots.
+LIVE_CAPTURE_SEQ = int(os.environ.get("SAFERL_LIVE_CAPTURE_SEQ", "0"))
 RESULTS_PATH = os.path.normpath(os.path.join(_HERE, "..", "..", RESULTS_NAME))
 LIVE_STATE_PATH = os.path.normpath(os.path.join(_HERE, "..", "..", LIVE_STATE_NAME))
 
@@ -152,6 +171,8 @@ ACE_GLB_NAME = "ACE_satellite"
 MOON_ROCK_NAMES = ["moon_rock_03", "moon_rock_04", "moon_rock_05",
                     "moon_rock_06", "moon_rock_07"]
 STARMAP_EXR_NAME = "nasa_starmap_2020_4k"
+# Emissive gain on the starmap; see _get_or_create_starmap_material.
+STARMAP_EMISSIVE_GAIN = float(os.environ.get("SAFERL_STARMAP_GAIN", "60.0"))
 
 SATELLITE_TARGET_MAX_DIM_CM = 500.0   # longest dimension after rescale
 ROCK_TARGET_MAX_DIM_CM = [190, 230, 160, 210, 250]  # per-rock variety
@@ -478,8 +499,20 @@ def _get_or_create_starmap_material(texture):
     except Exception as e:
         _log(f"could not set unlit shading model (non-fatal): {e!r}")
 
+    # Scale the starmap up before it reaches emissive. The NASA map is linear
+    # HDR data whose stars are, faithfully, very dim -- and the scene's
+    # auto-exposure adapts to a brightly-lit ground plane, which crushes them
+    # toward black. Phase 8c applied the texture directly and reported the sky
+    # as "real material applied but not strongly visible"; this is the
+    # hypothesis for why.
+    mult = unreal.MaterialEditingLibrary.create_material_expression(
+        material, unreal.MaterialExpressionMultiply, -170, 0)
+    mult.set_editor_property("const_b", STARMAP_EMISSIVE_GAIN)
+    unreal.MaterialEditingLibrary.connect_material_expressions(
+        tex_expr, "RGB", mult, "A")
+
     unreal.MaterialEditingLibrary.connect_material_property(
-        tex_expr, "RGB", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+        mult, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     unreal.MaterialEditingLibrary.recompile_material(material)
     unreal.EditorAssetLibrary.save_asset(content_path)
     _log(f"built unlit starmap material: {content_path}")
@@ -897,13 +930,43 @@ def _live_mirror_tick():
              f"reward={frame.get('ep_reward')}")
 
     # Periodic capture so the run leaves visual evidence of the satellite
-    # actually moving, rather than only a position number in a log. Alternating
-    # filenames means any two consecutive captures can be compared directly.
+    # actually moving, rather than only a position number in a log.
+    #
+    # Two modes. By default, alternating slots 0/1, so any two consecutive
+    # captures can be diffed to show motion without the run filling the disk.
+    # With SAFERL_LIVE_CAPTURE_SEQ=N, it instead writes a numbered sequence of
+    # N frames plus a sidecar of the metrics at each frame, which is what
+    # phase 10 assembles the demo animation from. Capture is expensive -- a
+    # SceneCapture2D re-render dragged phase 3's loop from ~119 to ~6
+    # steps/sec when left on every frame -- so both modes stay sparse.
     if LIVE_CAPTURE_EVERY and st["live_frames"] % LIVE_CAPTURE_EVERY == 0:
-        slot = (st["live_frames"] // LIVE_CAPTURE_EVERY) % 2
-        capture_png(bridge.world, f"live_policy_capture_{slot}.png")
-        _log(f"live: captured live_policy_capture_{slot}.png at "
-             f"ep {ep} step {frame.get('ep_step')} agent={agent}")
+        if LIVE_CAPTURE_SEQ:
+            n = st.get("live_seq_n", 0)
+            if n < LIVE_CAPTURE_SEQ:
+                name = f"live_seq_{n:03d}.png"
+                capture_png(bridge.world, name)
+                st["live_seq_n"] = n + 1
+                st.setdefault("live_seq_meta", []).append({
+                    "frame": n, "episode": ep, "ep_step": frame.get("ep_step"),
+                    "interventions": frame.get("interventions"),
+                    "fallbacks": frame.get("fallbacks"),
+                    "ep_reward": frame.get("ep_reward"),
+                    "agent": agent, "totals": frame.get("totals"),
+                })
+                try:
+                    meta_path = os.path.normpath(
+                        os.path.join(_HERE, "..", "..", "live_seq_meta.json"))
+                    with open(meta_path, "w") as f:
+                        json.dump(st["live_seq_meta"], f, indent=2)
+                except Exception as e:
+                    _log(f"live: could not write seq meta (non-fatal): {e!r}")
+                _log(f"live: captured {name} ({n+1}/{LIVE_CAPTURE_SEQ}) "
+                     f"ep {ep} step {frame.get('ep_step')}")
+        else:
+            slot = (st["live_frames"] // LIVE_CAPTURE_EVERY) % 2
+            capture_png(bridge.world, f"live_policy_capture_{slot}.png")
+            _log(f"live: captured live_policy_capture_{slot}.png at "
+                 f"ep {ep} step {frame.get('ep_step')} agent={agent}")
 
 
 def _finish():

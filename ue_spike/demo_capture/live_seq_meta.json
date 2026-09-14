@@ -1,0 +1,482 @@
+[
+  {
+    "frame": 0,
+    "episode": 1,
+    "ep_step": 45,
+    "interventions": 3,
+    "fallbacks": 0,
+    "ep_reward": -4.5,
+    "agent": [
+      -0.49666666984558105,
+      6.942083358764648,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 0,
+      "collisions": 0,
+      "timeouts": 0,
+      "interventions": 0,
+      "steps": 0
+    }
+  },
+  {
+    "frame": 1,
+    "episode": 1,
+    "ep_step": 95,
+    "interventions": 3,
+    "fallbacks": 0,
+    "ep_reward": -9.5,
+    "agent": [
+      4.438333511352539,
+      11.032083511352539,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 0,
+      "collisions": 0,
+      "timeouts": 0,
+      "interventions": 0,
+      "steps": 0
+    }
+  },
+  {
+    "frame": 2,
+    "episode": 1,
+    "ep_step": 146,
+    "interventions": 17,
+    "fallbacks": 0,
+    "ep_reward": -14.6,
+    "agent": [
+      6.557499885559082,
+      11.985833168029785,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 0,
+      "collisions": 0,
+      "timeouts": 0,
+      "interventions": 0,
+      "steps": 0
+    }
+  },
+  {
+    "frame": 3,
+    "episode": 1,
+    "ep_step": 250,
+    "interventions": 18,
+    "fallbacks": 0,
+    "ep_reward": -25.0,
+    "agent": [
+      4.43874979019165,
+      14.06958293914795,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 0,
+      "collisions": 0,
+      "timeouts": 0,
+      "interventions": 0,
+      "steps": 0
+    }
+  },
+  {
+    "frame": 4,
+    "episode": 1,
+    "ep_step": 301,
+    "interventions": 18,
+    "fallbacks": 0,
+    "ep_reward": -30.1,
+    "agent": [
+      8.05875015258789,
+      10.480833053588867,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 0,
+      "collisions": 0,
+      "timeouts": 0,
+      "interventions": 0,
+      "steps": 0
+    }
+  },
+  {
+    "frame": 5,
+    "episode": 2,
+    "ep_step": 39,
+    "interventions": 4,
+    "fallbacks": 0,
+    "ep_reward": -3.9,
+    "agent": [
+      -0.5166666507720947,
+      5.759583473205566,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 1,
+      "collisions": 0,
+      "timeouts": 0,
+      "interventions": 18,
+      "steps": 313
+    }
+  },
+  {
+    "frame": 6,
+    "episode": 2,
+    "ep_step": 97,
+    "interventions": 4,
+    "fallbacks": 0,
+    "ep_reward": -9.7,
+    "agent": [
+      2.0950000286102295,
+      10.602083206176758,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 1,
+      "collisions": 0,
+      "timeouts": 0,
+      "interventions": 18,
+      "steps": 313
+    }
+  },
+  {
+    "frame": 7,
+    "episode": 2,
+    "ep_step": 152,
+    "interventions": 18,
+    "fallbacks": 0,
+    "ep_reward": -15.2,
+    "agent": [
+      7.667500019073486,
+      11.543333053588867,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 1,
+      "collisions": 0,
+      "timeouts": 0,
+      "interventions": 18,
+      "steps": 313
+    }
+  },
+  {
+    "frame": 8,
+    "episode": 2,
+    "ep_step": 203,
+    "interventions": 20,
+    "fallbacks": 0,
+    "ep_reward": -20.3,
+    "agent": [
+      9.497916221618652,
+      13.851666450500488,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 1,
+      "collisions": 0,
+      "timeouts": 0,
+      "interventions": 18,
+      "steps": 313
+    }
+  },
+  {
+    "frame": 9,
+    "episode": 2,
+    "ep_step": 253,
+    "interventions": 20,
+    "fallbacks": 0,
+    "ep_reward": -25.3,
+    "agent": [
+      10.259166717529297,
+      10.557083129882812,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 1,
+      "collisions": 0,
+      "timeouts": 0,
+      "interventions": 18,
+      "steps": 313
+    }
+  },
+  {
+    "frame": 10,
+    "episode": 2,
+    "ep_step": 303,
+    "interventions": 23,
+    "fallbacks": 0,
+    "ep_reward": -30.3,
+    "agent": [
+      13.210000038146973,
+      5.708749771118164,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 1,
+      "collisions": 0,
+      "timeouts": 0,
+      "interventions": 18,
+      "steps": 313
+    }
+  },
+  {
+    "frame": 11,
+    "episode": 2,
+    "ep_step": 354,
+    "interventions": 23,
+    "fallbacks": 0,
+    "ep_reward": -35.4,
+    "agent": [
+      13.59708309173584,
+      1.8837499618530273,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 1,
+      "collisions": 0,
+      "timeouts": 0,
+      "interventions": 18,
+      "steps": 313
+    }
+  },
+  {
+    "frame": 12,
+    "episode": 2,
+    "ep_step": 405,
+    "interventions": 23,
+    "fallbacks": 0,
+    "ep_reward": -40.5,
+    "agent": [
+      14.060416221618652,
+      -1.5924999713897705,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 1,
+      "collisions": 0,
+      "timeouts": 0,
+      "interventions": 18,
+      "steps": 313
+    }
+  },
+  {
+    "frame": 13,
+    "episode": 2,
+    "ep_step": 512,
+    "interventions": 23,
+    "fallbacks": 0,
+    "ep_reward": -51.2,
+    "agent": [
+      12.006667137145996,
+      1.8266667127609253,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 1,
+      "collisions": 0,
+      "timeouts": 0,
+      "interventions": 18,
+      "steps": 313
+    }
+  },
+  {
+    "frame": 14,
+    "episode": 2,
+    "ep_step": 922,
+    "interventions": 35,
+    "fallbacks": 0,
+    "ep_reward": -92.2,
+    "agent": [
+      12.511249542236328,
+      9.921250343322754,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 1,
+      "collisions": 0,
+      "timeouts": 0,
+      "interventions": 18,
+      "steps": 313
+    }
+  },
+  {
+    "frame": 15,
+    "episode": 3,
+    "ep_step": 333,
+    "interventions": 20,
+    "fallbacks": 0,
+    "ep_reward": -33.3,
+    "agent": [
+      6.020416736602783,
+      10.774999618530273,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 1,
+      "collisions": 0,
+      "timeouts": 1,
+      "interventions": 60,
+      "steps": 1313
+    }
+  },
+  {
+    "frame": 16,
+    "episode": 5,
+    "ep_step": 87,
+    "interventions": 6,
+    "fallbacks": 0,
+    "ep_reward": -8.7,
+    "agent": [
+      5.005000114440918,
+      11.712916374206543,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 2,
+      "collisions": 0,
+      "timeouts": 2,
+      "interventions": 91,
+      "steps": 1969
+    }
+  },
+  {
+    "frame": 17,
+    "episode": 6,
+    "ep_step": 375,
+    "interventions": 1,
+    "fallbacks": 0,
+    "ep_reward": -37.5,
+    "agent": [
+      9.352916717529297,
+      12.28416633605957,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 3,
+      "collisions": 0,
+      "timeouts": 2,
+      "interventions": 97,
+      "steps": 2092
+    }
+  },
+  {
+    "frame": 18,
+    "episode": 7,
+    "ep_step": 159,
+    "interventions": 29,
+    "fallbacks": 0,
+    "ep_reward": -15.9,
+    "agent": [
+      4.09208345413208,
+      12.548333168029785,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 4,
+      "collisions": 0,
+      "timeouts": 2,
+      "interventions": 98,
+      "steps": 2693
+    }
+  },
+  {
+    "frame": 19,
+    "episode": 7,
+    "ep_step": 511,
+    "interventions": 79,
+    "fallbacks": 0,
+    "ep_reward": -51.1,
+    "agent": [
+      13.631250381469727,
+      10.648333549499512,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 4,
+      "collisions": 0,
+      "timeouts": 2,
+      "interventions": 98,
+      "steps": 2693
+    }
+  },
+  {
+    "frame": 20,
+    "episode": 8,
+    "ep_step": 166,
+    "interventions": 11,
+    "fallbacks": 0,
+    "ep_reward": -16.6,
+    "agent": [
+      6.927083492279053,
+      10.175416946411133,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 5,
+      "collisions": 0,
+      "timeouts": 2,
+      "interventions": 177,
+      "steps": 3432
+    }
+  },
+  {
+    "frame": 21,
+    "episode": 10,
+    "ep_step": 134,
+    "interventions": 26,
+    "fallbacks": 0,
+    "ep_reward": -13.4,
+    "agent": [
+      5.298333168029785,
+      11.385833740234375,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 7,
+      "collisions": 0,
+      "timeouts": 2,
+      "interventions": 220,
+      "steps": 3872
+    }
+  },
+  {
+    "frame": 22,
+    "episode": 11,
+    "ep_step": 381,
+    "interventions": 0,
+    "fallbacks": 0,
+    "ep_reward": -38.1,
+    "agent": [
+      11.905416488647461,
+      9.730833053588867,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 8,
+      "collisions": 0,
+      "timeouts": 2,
+      "interventions": 249,
+      "steps": 4033
+    }
+  },
+  {
+    "frame": 23,
+    "episode": 12,
+    "ep_step": 294,
+    "interventions": 41,
+    "fallbacks": 0,
+    "ep_reward": -29.4,
+    "agent": [
+      10.296250343322754,
+      9.828749656677246,
+      0.24999000132083893
+    ],
+    "totals": {
+      "goals": 9,
+      "collisions": 0,
+      "timeouts": 2,
+      "interventions": 255,
+      "steps": 4530
+    }
+  }
+]

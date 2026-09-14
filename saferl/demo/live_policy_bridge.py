@@ -45,8 +45,16 @@ def _base_env(env):
 
 def _write_state(path, payload):
     """Atomic publish: UE polls this file every tick and must never read a
-    half-written frame."""
-    tmp = f"{path}.tmp"
+    half-written frame.
+
+    The scratch name carries this process's PID. With a single fixed
+    `.tmp` name, two bridges pointed at the same state file race: A writes
+    tmp, B writes tmp, A's os.replace consumes it, and B's os.replace then
+    dies with FileNotFoundError. That is not hypothetical -- it killed a
+    phase 10 demo run when a previous bridge survived a pkill and the next
+    run started alongside it.
+    """
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump(payload, f)
     os.replace(tmp, path)

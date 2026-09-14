@@ -61,6 +61,17 @@ if [[ ! -f "$CHECKPOINT" ]]; then
   echo "[demo] ERROR: checkpoint not found: $CHECKPOINT"; exit 1
 fi
 
+# Refuse to race a demo that is already up. Two bridges publishing to one
+# state file corrupt each other's frames, and two editors fight over the
+# same PIE session -- both of which happened during phase 10 when a
+# previous run survived its shutdown.
+if pgrep -f "saferl.demo.live_policy_bridge" >/dev/null 2>&1; then
+  echo "[demo] ERROR: a policy bridge is already running:"
+  pgrep -af "saferl.demo.live_policy_bridge" | sed 's/^/         /'
+  echo "       Stop it first:  pkill -f saferl.demo.live_policy_bridge"
+  exit 1
+fi
+
 UPROJECT="$REPO/ue_spike/SafeRLUESpike.uproject"
 HEARTBEAT="$REPO/ue_spike/pie_heartbeat.log"
 STATE="$REPO/ue_spike/live_policy_state.json"

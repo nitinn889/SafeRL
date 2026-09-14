@@ -1,0 +1,28 @@
+[demo] launching Unreal editor (log: /tmp/saferl_ue_demo.log)
+[demo] waiting for the PIE session to come up (typically ~40s)...
+1789367570.822 scene built (phase 8c real-asset status: {'satellite': 'real (NASA ACE)', 'rocks': '5/5 real (Poly Haven moon_rock)', 'sky': 'real (NASA Deep Star Maps 2020)'})
+1789367571.170 live: found 5 debris actors to mirror
+[demo] UE is live and mirroring.
+[demo] starting the trained policy: saferl/eval/phase9/saferl_phase9_best.zip
+[demo] Ctrl-C to stop.
+
+pybullet build time: Sep 11 2026 21:05:26
+[live] checkpoint: saferl/eval/phase9/saferl_phase9_best.zip
+[live] hazards: 5 (curriculum=off), sensor_range=6.0
+[live] publishing state to /home/nitin-nandakumar/Downloads/SafeRL/ue_spike/live_policy_state.json at ~30 steps/s
+[live] deterministic=True, seed=7
+[live] Ctrl-C to stop.
+
+[live] ep    1  GOAL        steps= 313  reward=   68.7  interventions=  18 ( 5.75%)  | running goal rate 100.0% (1/1), collisions 0
+[live] ep    2  timeout/oob steps=1000  reward= -100.0  interventions=  42 ( 4.20%)  | running goal rate  50.0% (1/2), collisions 0
+[live] ep    3  GOAL        steps= 439  reward=   56.1  interventions=  31 ( 7.06%)  | running goal rate  66.7% (2/3), collisions 0
+[live] ep    4  timeout/oob steps= 217  reward= -121.7  interventions=   0 ( 0.00%)  | running goal rate  50.0% (2/4), collisions 0
+[live] ep    5  GOAL        steps= 123  reward=   87.7  interventions=   6 ( 4.88%)  | running goal rate  60.0% (3/5), collisions 0
+[live] ep    6  GOAL        steps= 601  reward=   39.9  interventions=   1 ( 0.17%)  | running goal rate  66.7% (4/6), collisions 0
+[live] ep    7  GOAL        steps= 739  reward=   26.1  interventions=  79 (10.69%)  | running goal rate  71.4% (5/7), collisions 0
+[live] ep    8  GOAL        steps= 179  reward=   82.1  interventions=  12 ( 6.70%)  | running goal rate  75.0% (6/8), collisions 0
+[live] ep    9  GOAL        steps= 261  reward=   73.9  interventions=  31 (11.88%)  | running goal rate  77.8% (7/9), collisions 0
+[live] ep   10  GOAL        steps= 161  reward=   83.9  interventions=  29 (18.01%)  | running goal rate  80.0% (8/10), collisions 0
+[live] ep   11  GOAL        steps= 497  reward=   50.3  interventions=   6 ( 1.21%)  | running goal rate  81.8% (9/11), collisions 0
+[live] ep   12  GOAL        steps= 617  reward=   38.3  interventions=  65 (10.53%)  | running goal rate  83.3% (10/12), collisions 0
+[live] ep   13  GOAL        steps= 183  reward=   81.7  interventions=  29 (15.85%)  | running goal rate  84.6% (11/13), collisions 0
