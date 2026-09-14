@@ -28,6 +28,24 @@ ACTION_THRUST_DIRS = np.array([
     [1.0,  0.0, 0.0],   # 3: +X
 ], dtype=np.float64)
 
+# 3D free flight appends +Z/-Z after the planar four, so indices 0-3 mean
+# exactly what they meant in 2D and scenarios and tests written against the
+# planar table stay valid under either.
+ACTION_THRUST_DIRS_3D = np.vstack([
+    ACTION_THRUST_DIRS,
+    [[0.0, 0.0,  1.0],   # 4: +Z
+     [0.0, 0.0, -1.0]],  # 5: -Z
+])
+
+
+def thrust_dirs(dims):
+    """The action table for a planar (2) or free-flight (3) env."""
+    if dims == 2:
+        return ACTION_THRUST_DIRS
+    if dims == 3:
+        return ACTION_THRUST_DIRS_3D
+    raise ValueError(f"dims must be 2 or 3, got {dims!r}")
+
 # sphere2.urdf's base mass. globalScaling resizes the geometry but does NOT
 # rescale mass, so this holds regardless of the 0.5 scaling in reset().
 # Thrust acceleration available to the agent is force_mag / AGENT_MASS.
@@ -42,8 +60,14 @@ class SafeNav3DEnv(gym.Env):
                  sim_substeps=10, agent_friction=0.0, max_episode_steps=1000,
                  debris_min_speed=0.3, debris_max_speed=1.2,
                  debris_speed_ramp_episodes=200, bounds_margin=5.0,
-                 out_of_bounds_penalty=-100.0, sensor_range=None):
+                 out_of_bounds_penalty=-100.0, sensor_range=None, dims=2):
         super().__init__()
+        # dims=2 is the planar env every result through phase 10 was produced
+        # on: gravity, a ground plane, x/y thrust. dims=3 is free flight -- no
+        # gravity, no plane, thrust and debris motion on all three axes.
+        self.dims = int(dims)
+        self.thrust_dirs = thrust_dirs(self.dims)
+        self._axes = (0, 1, 2) if self.dims == 3 else (0, 1)
         self.size = size
         self.max_hazards = max_hazards
         self.curriculum = curriculum
@@ -70,13 +94,14 @@ class SafeNav3DEnv(gym.Env):
         # drift matches the agent's control timescale
         self.step_dt = sim_substeps / PHYSICS_HZ
 
-        self.action_space = gym.spaces.Discrete(4)
+        self.action_space = gym.spaces.Discrete(len(self.thrust_dirs))
         self.observation_space = gym.spaces.Box(
             low=-20, high=20,
             shape=(OBS_HEADER_LEN + OBS_PER_HAZARD * max_hazards,),
             dtype=np.float32
         )
-        self.goal_pos = np.array([size - 1, size - 1, 0.5], dtype=np.float32)
+        goal_z = size - 1 if self.dims == 3 else 0.5
+        self.goal_pos = np.array([size - 1, size - 1, goal_z], dtype=np.float32)
 
     # ------ PyBullet lifecycle ------
     def _connect(self):
@@ -106,11 +131,17 @@ class SafeNav3DEnv(gym.Env):
         cid = self._client
 
         p.resetSimulation(physicsClientId=cid)
-        p.setGravity(0, 0, -9.81, physicsClientId=cid)
-        p.loadURDF("plane.urdf", physicsClientId=cid)
+        if self.dims == 3:
+            # free flight: nothing to fall toward and nothing to rest on
+            p.setGravity(0, 0, 0, physicsClientId=cid)
+            start = [0.0, 0.0, 0.0]
+        else:
+            p.setGravity(0, 0, -9.81, physicsClientId=cid)
+            p.loadURDF("plane.urdf", physicsClientId=cid)
+            start = [0, 0, 0.5]
 
         self.agent_id = p.loadURDF(
-            "sphere2.urdf", [0, 0, 0.5], globalScaling=0.5,
+            "sphere2.urdf", start, globalScaling=0.5,
             physicsClientId=cid
         )
         p.changeVisualShape(self.agent_id, -1, rgbaColor=[0, 0, 1, 1],
@@ -164,7 +195,9 @@ class SafeNav3DEnv(gym.Env):
             h_pos = [
                 float(np.random.uniform(1, self.size - 2)),
                 float(np.random.uniform(1, self.size - 2)),
-                0.5
+                # the planar branch draws nothing, so 2D consumes the global
+                # RNG exactly as before and every published episode reproduces
+                float(np.random.uniform(1, self.size - 2)) if self.dims == 3 else 0.5,
             ]
             body_id = p.loadURDF("r2d2.urdf", h_pos, globalScaling=0.6,
                                  physicsClientId=cid)
@@ -173,9 +206,17 @@ class SafeNav3DEnv(gym.Env):
             # or letting contact impulses shove them around.
             p.changeDynamics(body_id, -1, mass=0, physicsClientId=cid)
 
-            heading = float(np.random.uniform(0, 2 * np.pi))
-            speed = float(np.random.uniform(lo_speed, hi_speed))
-            h_vel = [speed * float(np.cos(heading)), speed * float(np.sin(heading)), 0.0]
+            if self.dims == 3:
+                # uniform over the sphere: a normalised Gaussian draw, not a
+                # uniform pair of angles, which would bunch headings at the poles
+                u = np.random.normal(size=3)
+                u /= np.linalg.norm(u) or 1.0
+                speed = float(np.random.uniform(lo_speed, hi_speed))
+                h_vel = [speed * float(u[0]), speed * float(u[1]), speed * float(u[2])]
+            else:
+                heading = float(np.random.uniform(0, 2 * np.pi))
+                speed = float(np.random.uniform(lo_speed, hi_speed))
+                h_vel = [speed * float(np.cos(heading)), speed * float(np.sin(heading)), 0.0]
 
             self.hazard_positions.append(h_pos)
             self.hazard_velocities.append(h_vel)
@@ -191,7 +232,7 @@ class SafeNav3DEnv(gym.Env):
         """
         cid = self._client
         for i, (pos, vel) in enumerate(zip(self.hazard_positions, self.hazard_velocities)):
-            for axis in (0, 1):
+            for axis in self._axes:
                 pos[axis] += vel[axis] * self.step_dt
                 if pos[axis] < 0.0:
                     pos[axis] = -pos[axis]
@@ -237,11 +278,11 @@ class SafeNav3DEnv(gym.Env):
     def _out_of_bounds(self, pos):
         """Has the agent drifted out of the play area by more than the margin?"""
         lo, hi = -self.bounds_margin, self.size + self.bounds_margin
-        return not all(lo <= float(pos[ax]) <= hi for ax in (0, 1))
+        return not all(lo <= float(pos[ax]) <= hi for ax in self._axes)
 
     def step(self, action):
         cid = self._client
-        force = (ACTION_THRUST_DIRS[int(action)] * self.force_mag).tolist()
+        force = (self.thrust_dirs[int(action)] * self.force_mag).tolist()
 
         # applyExternalForce only lasts a single substep, so one env step held
         # thrust for 1/240s -- 0.005 m/s of delta-v, far too little to cross the

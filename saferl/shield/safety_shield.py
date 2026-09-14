@@ -27,6 +27,7 @@ from saferl.env.base_env import (
     OBS_HEADER_LEN,
     OBS_PER_HAZARD,
     PHYSICS_HZ,
+    thrust_dirs,
 )
 
 # Derived from configs/default.yaml rather than restated here. A shield whose
@@ -62,7 +63,7 @@ class ShieldDecision:
 
 
 class SafetyShield:
-    """Least-restrictive safe-action shield over the Discrete(4) action set.
+    """Least-restrictive safe-action shield over the env's discrete thrust set.
 
     Model used for the lookahead (all deliberately simple, and all stated
     here so the approximations are auditable):
@@ -74,24 +75,32 @@ class SafetyShield:
         reflection is ignored -- a bounce can only move a hazard *away* from
         a straight-line prediction near the wall, so ignoring it is the
         conservative direction.
-      * The z axis is dropped from the velocity propagation. Thrust is purely
-        in x/y and the agent rests on the plane, so its z velocity is contact
-        settling, not commandable motion; propagating it would let the shield
-        believe the agent can duck under a hazard. The z *offset* between
-        agent and hazard is kept, so the separation stays a true 3D distance.
+      * In the planar env the z axis is dropped from the agent's velocity
+        propagation. Thrust is purely in x/y and the agent rests on the plane,
+        so its z velocity is contact settling, not commandable motion;
+        propagating it would let the shield believe the agent can duck under
+        a hazard. The z *offset* between agent and hazard is kept, so the
+        separation stays a true 3D distance. In 3D free flight the action
+        table has z thrust, vertical motion is real, and it is propagated like
+        any other axis -- zeroing it there would blind the shield to the
+        agent climbing or diving into a hazard.
     """
 
     def __init__(self, safe_dist=DEFAULT_SAFE_DIST,
                  lookahead_steps=DEFAULT_LOOKAHEAD_STEPS,
                  accel=DEFAULT_ACCEL, step_dt=DEFAULT_STEP_DT,
-                 keep_log=False, log_limit=10000):
+                 keep_log=False, log_limit=10000, thrust_dirs=None):
         self.safe_dist = safe_dist
         self.lookahead_steps = int(lookahead_steps)
         self.accel = float(accel)
         self.step_dt = float(step_dt)
 
+        dirs = (ACTION_THRUST_DIRS if thrust_dirs is None
+                else np.asarray(thrust_dirs, dtype=np.float64))
         # thrust acceleration vector per action, (A, 3)
-        self._acc = ACTION_THRUST_DIRS * self.accel
+        self._acc = dirs * self.accel
+        # whether any action commands vertical thrust (3D free flight)
+        self._has_z_thrust = bool(np.any(dirs[:, 2] != 0))
         # sample times, excluding t=0: the question this shield answers is
         # "does this action lead into a hazard", not "am I near one already".
         self._ts = self.step_dt * np.arange(1, self.lookahead_steps + 1)
@@ -116,6 +125,7 @@ class SafetyShield:
             lookahead_steps=cfg["shield"]["lookahead_steps"],
             accel=cfg["env"]["force_mag"] / AGENT_MASS,
             step_dt=cfg["env"]["sim_substeps"] / PHYSICS_HZ,
+            thrust_dirs=thrust_dirs(cfg["env"].get("dims", 2)),
         )
         kwargs.update(overrides)
         return cls(**kwargs)
@@ -152,7 +162,8 @@ class SafetyShield:
         """
         p0 = np.asarray(obs[0:3], dtype=np.float64)
         v0 = np.asarray(obs[3:6], dtype=np.float64).copy()
-        v0[2] = 0.0  # see class docstring: z velocity is settling, not control
+        if not self._has_z_thrust:
+            v0[2] = 0.0  # planar env: z velocity is settling, not control (see docstring)
 
         h_pos, h_vel = self._hazards(obs)
         n_h = h_pos.shape[0]
@@ -289,9 +300,10 @@ class RandomReplacementShield:
     on that failure mode. Not used in training.
     """
 
-    def __init__(self, safe_dist=DEFAULT_SAFE_DIST, rng=None):
+    def __init__(self, safe_dist=DEFAULT_SAFE_DIST, rng=None, n_actions=4):
         self.safe_dist = safe_dist
         self.rng = rng if rng is not None else np.random
+        self.n_actions = int(n_actions)
         self.n_checks = 0
         self.n_triggered = 0
         self.n_substituted = 0
@@ -306,7 +318,7 @@ class RandomReplacementShield:
             if h_pos.shape[0] < 3 or np.all(h_pos == 0):
                 continue
             if np.linalg.norm(pos - h_pos) < self.safe_dist:
-                replacement = int(self.rng.choice([0, 1, 2, 3]))
+                replacement = int(self.rng.choice(list(range(self.n_actions))))
                 self.n_triggered += 1
                 self.n_substituted += 1
                 self.last_decision = ShieldDecision(

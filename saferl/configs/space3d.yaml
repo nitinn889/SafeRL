@@ -1,0 +1,18 @@
+# 3D free-flight variant: a satellite flying through a volume of drifting
+# debris rather than across a plane. Everything not listed here -- thrust,
+# substeps, bounds, penalties, sensor range, shield horizon, constraint
+# target -- is inherited from default.yaml unchanged. The shield's lookahead
+# calibration therefore still holds: thrust magnitude and step time are the
+# same, only the directions they can point in have grown.
+extends: default.yaml
+
+env:
+  dims: 3
+  # 12, not 5, so a crossing meets about as many hazards as it does in 2D.
+  # 2D: each hazard blocks a 2*safe_dist = 4.4 wide band; along the 12.7-unit
+  # diagonal over a 100 unit^2 field that is 0.56 expected close passes per
+  # hazard, x5 = 2.8. 3D: each blocks a pi*safe_dist^2 = 15.2 unit^2
+  # cross-section; along the 15.6-unit diagonal over a 1000 unit^3 volume that
+  # is 0.24 per hazard, so 12 gives the same ~2.8. Five would leave the volume
+  # nearly empty and the shield rarely exercised.
+  max_hazards: 12

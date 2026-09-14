@@ -1,5 +1,8 @@
 # Default hyperparameters for the PyBullet SafeNav3DEnv training pipeline.
 env:
+  # 2 = planar (gravity, ground plane, x/y thrust) -- every result through
+  # phase 10 was produced here. 3 = free flight; see space3d.yaml.
+  dims: 2
   size: 10
   max_hazards: 5
   curriculum: true
