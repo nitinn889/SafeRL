@@ -1,0 +1,23 @@
+[live] checkpoint: saferl/eval/space3d/long/saferl_space3d_best.zip
+[live] hazards: 12 (curriculum=off), sensor_range=6.0
+[live] publishing state to /home/nitin-nandakumar/Downloads/SafeRL/ue_spike/live_policy_state.json at ~30 steps/s
+[live] deterministic=True, seed=7
+[live] Ctrl-C to stop.
+[live] ep    1  timeout/oob steps=1000  reward= -100.0  interventions=  49 ( 4.90%)  | running goal rate   0.0% (0/1), collisions 0
+[live] ep    2  GOAL        steps= 212  reward=   78.8  interventions=  38 (17.92%)  | running goal rate  50.0% (1/2), collisions 0
+[live] ep    3  GOAL        steps= 927  reward=    7.3  interventions= 172 (18.55%)  | running goal rate  66.7% (2/3), collisions 0
+[live] ep    4  GOAL        steps= 294  reward=   70.6  interventions= 117 (39.80%)  | running goal rate  75.0% (3/4), collisions 0
+[live] ep    5  GOAL        steps= 155  reward=   84.5  interventions=  15 ( 9.68%)  | running goal rate  80.0% (4/5), collisions 0
+[live] ep    6  GOAL        steps= 343  reward=   65.7  interventions=  61 (17.78%)  | running goal rate  83.3% (5/6), collisions 0
+[live] ep    7  GOAL        steps= 505  reward=   49.5  interventions=  38 ( 7.52%)  | running goal rate  85.7% (6/7), collisions 0
+[live] ep    8  GOAL        steps= 497  reward=   50.3  interventions=  59 (11.87%)  | running goal rate  87.5% (7/8), collisions 0
+[live] ep    9  GOAL        steps= 275  reward=   72.5  interventions=  44 (16.00%)  | running goal rate  88.9% (8/9), collisions 0
+[live] ep   10  GOAL        steps= 453  reward=   54.7  interventions=  52 (11.48%)  | running goal rate  90.0% (9/10), collisions 0
+[live] ep   11  GOAL        steps= 441  reward=   55.9  interventions=  25 ( 5.67%)  | running goal rate  90.9% (10/11), collisions 0
+[live] ep   12  GOAL        steps= 580  reward=   42.0  interventions=  71 (12.24%)  | running goal rate  91.7% (11/12), collisions 0
+[live] ep   13  GOAL        steps= 700  reward=   30.0  interventions=  23 ( 3.29%)  | running goal rate  92.3% (12/13), collisions 0
+[live] ep   14  GOAL        steps= 325  reward=   67.5  interventions=  16 ( 4.92%)  | running goal rate  92.9% (13/14), collisions 0
+[live] ep   15  GOAL        steps= 520  reward=   48.0  interventions=  70 (13.46%)  | running goal rate  93.3% (14/15), collisions 0
+[live] ep   16  GOAL        steps= 519  reward=   48.1  interventions=  49 ( 9.44%)  | running goal rate  93.8% (15/16), collisions 0
+[live] ep   17  GOAL        steps= 173  reward=   82.7  interventions=  13 ( 7.51%)  | running goal rate  94.1% (16/17), collisions 0
+[live] ep   18  timeout/oob steps=1000  reward= -100.0  interventions=  46 ( 4.60%)  | running goal rate  88.9% (16/18), collisions 0

@@ -30,6 +30,8 @@ def main():
     ap.add_argument("--width", type=int, default=760)
     ap.add_argument("--ms", type=int, default=500, help="frame duration")
     ap.add_argument("--colors", type=int, default=64)
+    ap.add_argument("--label", default="450k ckpt, 5 hazards",
+                    help="checkpoint/difficulty tag shown in the panel")
     args = ap.parse_args()
 
     with open(os.path.join(args.src, "live_seq_meta.json")) as f:
@@ -68,7 +70,7 @@ def main():
         d.text((14, h + 68),
                f"goals {tot.get('goals',0)}/{done} ({rate})   "
                f"collisions {tot.get('collisions',0)}   "
-               f"450k ckpt, 5 hazards",
+               f"{args.label}",
                font=small, fill=(150, 220, 170))
         frames.append(canvas)
 

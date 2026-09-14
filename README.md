@@ -51,6 +51,28 @@ detection) measures 75.2% / 2.73% mixed-curriculum and 65.6% / 2.67% full
 5-hazard — better at satisfying the constraint, meaningfully worse at the task.
 The 450k checkpoint is the reported one.
 
+### 3D: free flight through a debris volume (phase 11)
+
+The same pipeline, retrained for true 3D flight — zero gravity, six thrust
+directions, 12 rocks drifting on all three axes — and rendered in Unreal as
+deep space. Reported checkpoint: `saferl/eval/space3d/long/saferl_space3d_best.zip`,
+chosen by the same selection rule as 2D. 500 episodes, seed 42, deterministic,
+real goal.
+
+| Eval condition | Goal rate | Intervention rate | Collisions |
+|---|---|---|---|
+| Mixed-curriculum | **92.6%** | **10.29%** | 0 |
+| **Full fixed 12-hazard** (what the scene shows) | **81.2%** | **11.97%** | 0 |
+
+The shield's constructed stress test carries over exactly: 0/150 collisions
+against 150/150 unshielded. The 5% intervention target is not met in 3D either.
+Getting a policy to learn at all took a success-gated goal curriculum — the
+first run, from scratch against the far-corner goal, scored 0/100 and learned
+to wait out the clock. That failed run, and the gate that caught it, are
+documented in phase 11 alongside everything else.
+
+![the trained policy flying the 3D debris field in Unreal](ue_spike/demo_capture/space3d_demo.gif)
+
 ## Run it
 
 **The visual demo** (Unreal + the trained policy, live):
@@ -59,8 +81,17 @@ The 450k checkpoint is the reported one.
 ./run_ue_demo.sh
 ```
 
+The 3D space scene (free flight, 12 rocks, point stars), with a chase camera:
+
+```bash
+./run_ue_demo.sh --config saferl/configs/space3d.yaml --camera chase
+```
+
+Switch cameras while it runs with `echo wide > ue_spike/camera_mode` (or `chase`).
+
 One command: it mounts the engine drive if needed, launches the editor, waits
-for the PIE session, then runs the 450k policy with per-episode metrics
+for the PIE session, then runs the reported policy for that config (the 450k
+checkpoint in 2D, `saferl_space3d_best.zip` in 3D) with per-episode metrics
 streaming to your terminal. Ctrl-C stops both. The policy runs in a separate
 process and Unreal mirrors its state — UE 5.8 embeds Python 3.11, this venv is
 3.14, and torch/SB3 are interpreter-locked, so the policy cannot run inside the
@@ -139,12 +170,22 @@ pytest tests/          # 40 tests
    renders as a plain sphere despite mesh path, vertex count, material and world
    position all checking out (phase 8c eliminated 7 hypotheses; it is visible in
    the demo animation). And the NASA starmap dome renders but reads as dark
-   grain rather than stars — phase 10 traced this to scale, a 4K equirectangular
-   map over a 50,000-unit dome putting stars below one rendered pixel.
-7. **The scene has a ground plane.** The env inherits one from PyBullet, so the
-   "satellite" flies over a floor rather than through free space. Physically odd
-   for the premise; it has never affected the RL result, which is why it has
-   never been changed.
+   grain rather than stars. Phase 10 blamed scale (stars below one rendered
+   pixel); **phase 11 showed that wrong** — angular resolution does not depend
+   on dome radius, and 33x emissive gain under locked exposure still produced
+   no stars — without isolating the real cause. The 3D space scene draws
+   procedural point stars instead, labelled as procedural. The sphere-rock
+   issue does not appear in the 3D scene's own level.
+7. **The 2D scene has a ground plane.** The planar env inherits one from
+   PyBullet, so the 2D "satellite" flies over a floor rather than through free
+   space. Phase 11's 3D config removes it — zero gravity, no plane — and the 3D
+   result above is measured there. The 2D env keeps it so every published 2D
+   number still reproduces.
+8. **3D probes are even more optimistic than 2D ones.** The 3D selection probe
+   read 99% goal / 7.45% interventions; held out at full difficulty the same
+   weights measure 81.2% / 11.97%. And the 3D "mixed-curriculum" condition never
+   reaches full difficulty inside 500 episodes (12 hazards arrive at episode
+   550), so quote the full fixed 12-hazard row.
 
 ## Possible future work
 
@@ -154,7 +195,9 @@ no credit for dodging well, only penalties for needing the shield); revisiting
 the 5% target with a tighter constraint curriculum or a larger policy, since the
 evidence says the current pairing has plateaued; a composite
 goal-rate-and-intervention checkpoint-selection criterion instead of goal rate
-alone; and a higher-resolution starmap if the sky ever needs to read as stars.
+alone; a real star catalogue (e.g. Hipparcos) for the 3D scene's point stars in
+place of procedural ones; and parallel environments, since training is
+CPU-bound (the GPU measured slower for this network size).
 
 ---
 
@@ -2276,3 +2319,284 @@ is a stable equilibrium that came up short, with the Lagrange multiplier still
 climbing (1.79 → 2.42) when training stopped. That shortfall is a measured
 result, not a rounding error, and it is the honest headline alongside the
 goal-rate figures.
+
+---
+
+## Phase 11 (2026-09-14): True 3D flight through a debris volume, rendered as space
+
+Phases 1–10 trained and evaluated a *planar* task: gravity, a ground plane,
+x/y thrust. The premise is a satellite in space, so phase 11 makes it one — free
+flight on all three axes through a volume of drifting rocks — retrains the full
+pipeline for it, and rebuilds the Unreal scene to look like deep space instead
+of a checkerboard floor.
+
+**The 2D result is untouched.** Dimensionality is a config switch (`env.dims`,
+default 2); 3D lives in [`saferl/configs/space3d.yaml`](saferl/configs/space3d.yaml),
+which `extends:` the default and overrides only what it states. The published
+2D figures were re-verified after every change that touched shared code: a
+30-episode eval of the 450k checkpoint run from a `git worktree` of the previous
+commit and from the working tree printed identical output, and the 2D stress
+test JSON is byte-identical.
+
+### Design
+
+| | 2D (phases 1–10) | 3D (phase 11) |
+|---|---|---|
+| Physics | gravity, `plane.urdf` | zero gravity, no plane |
+| Actions | `Discrete(4)`: ±X, ±Y | `Discrete(6)`: the same four, then +Z, −Z (indices 0–3 keep their meaning) |
+| Debris | spawn, drift, reflect in x/y | spawn, drift, reflect on all three axes |
+| Hazards | 5 | 12 |
+| Observation | 39 | 81 (9 + 6 per hazard; the layout was already 3D) |
+| Goal | far corner of the square | far corner of the cube, 15.6 units away |
+
+**Why 12 rocks:** the aim is the same encounter rate, not the same count. In 2D
+each hazard blocks a 4.4-wide band (2 × `safe_dist`), so a 12.7-unit diagonal
+crossing of a 100 unit² field expects 0.56 close passes per hazard, 2.8 for
+five. In 3D each hazard blocks a π·2.2² = 15.2 unit² cross-section; a 15.6-unit
+crossing of a 1000 unit³ volume expects 0.24 per hazard, so twelve gives the
+same ~2.8.
+
+**Shield:** the action model is read from the same thrust table the env steps
+with (`thrust_dirs(dims)`), so the two cannot drift apart. The only logic change
+is in `_predict`: the planar shield zeroed vertical velocity by design, and in
+3D that would blind it to a hazard closing from above. It now propagates z
+whenever the table can thrust in z. Thrust magnitude and step time are
+unchanged, so the phase 6 lookahead calibration (20 steps) still holds.
+
+**Tests:** 24 new (env: no gravity, vertical thrust, 3D debris motion and
+bounds, spaces, the thrust table; shield: hazards from above and below, a
+receding hazard, ±Z sidesteps, a six-direction boxed-in fallback, the goal
+curriculum). **64/64 passing**, the original 40 unmodified.
+
+### Stress test: the shield in 3D
+
+25 trials per scenario, constructed so an unshielded agent collides.
+
+| Scenario | No shield | Random replacement | Least-restrictive |
+|---|---|---|---|
+| Head-on | 25/25 | 25/25 | **0/25** |
+| Crossing from above | 25/25 | 25/25 | **0/25** |
+| Crossing from below | 25/25 | 25/25 | **0/25** |
+| Oblique crossing | 25/25 | 25/25 | **0/25** |
+| Vertical pincer | 25/25 | 25/25 | **0/25** |
+| Surrounded on 6 sides | 25/25 | 18/25 | **0/25** |
+| **Total** | **150/150** | **143/150** | **0/150** |
+
+The 2D result (150/150 → 0/150) carries over. In the six-sided surround every
+direction is unsafe and the shield falls back on every intervention (60 of 60),
+yet still holds a mean closest approach of 1.99 against a collision radius of
+1.3. Full table: [`saferl/eval/space3d/stress_results.txt`](saferl/eval/space3d/stress_results.txt).
+
+### Training, with the gates that were set before it started
+
+The plan committed to stage gates in advance — so that a failing recipe would be
+reported, not tuned until it passed. Stage A: ≥50% goals on a 100-episode
+held-out eval against the real goal. Stage B: no more than 20pp below A. All
+gate evals use probe seed 7 with the curriculum off; seed 42 stays reserved for
+the reported numbers.
+
+| Run | Steps | What changed | Gate eval (100 ep) | Gate |
+|---|---|---|---|---|
+| A0 — from scratch, fixed goal | 600k | — | **0%** goals, 1.08% iv | **failed** (≥50%) |
+| A1 — goal curriculum | 600k | success-gated goal curriculum | 26% goals, 3.89% iv | failed |
+| A2 — A1 continued | +600k | none | **65%** goals, 8.32% iv | **passed** |
+| B — constrained | 400k | Lagrangian on, target 0.25 → 0.05 | **78%** goals, 9.98% iv | **passed** (≥45%) |
+| C — convergence-stopped | 400k | phase 9 probe/plateau protocol | see below | — |
+
+0 collisions in every gate eval.
+
+**A0 failed, and it failed informatively.** The unconstrained policy reached the
+goal in 7 of 703 training episodes and converged on waiting out the 1000-step
+clock inside the field: 541 of 703 episodes ran to the limit, task reward
+flattened near −100. The reason is the reward's arithmetic — −0.1 per step for
+1000 steps costs the same as the −100 out-of-bounds penalty, so without ever
+finding the +100 goal, hovering is the best policy available. And finding it is
+far harder than in 2D: the goal is a 1-unit sphere 15.6 units away in 1000 unit³,
+reached by chance in a direction space with six choices, not a disc on a plane.
+Curves and CSVs are committed in [`saferl/eval/space3d/pretrain/`](saferl/eval/space3d/pretrain/).
+
+**The fix is a goal curriculum, not a reward change.** The goal starts 20% of
+the way along the start→goal line and moves another 10% each time the last 20
+episodes reach it at 60% or better, until it sits at the real corner. It is gated
+on *success*, not an episode count, so it cannot outrun the policy. Two
+properties were kept deliberately:
+
+- **The reward is unchanged.** Distance shaping would likely have worked faster,
+  but the 3D numbers would then come from a different objective than the 2D
+  ones, and the comparison would be weaker for it.
+- **Every evaluation uses the real goal.** Both `evaluate()` and the probe path
+  `evaluate_model()` force the curriculum off, as does the Unreal bridge. No
+  number in this section was measured against a moved goal.
+
+The curriculum is off by default, active only when `curriculum` is also on, and
+logged per episode (`goal_fraction` in every episode CSV, overlaid on the goal
+rate panel of each plot).
+
+A1 shows why success-gating matters: over 600k steps the goal only reached 60%
+of the way out, and the policy scored 26% on the real task. A2 continued the same
+weights; a fresh env restarts the curriculum at 20%, but a competent policy
+re-climbed it to the real goal within 74k steps and then reached it in 75 of its
+last 100 training episodes.
+
+**Stage B** ran phase 6b's recipe unchanged. It passed comfortably, but λ ended
+at only 0.038 — the constraint had barely begun to bind, and the intervention
+rate *rose* (8.3% → 10.0%) as goal rate improved.
+
+**Stage C** ran phase 9's convergence protocol unchanged: a 100-episode held-out
+probe every 50k steps, stopping on plateau or on no improvement.
+
+| Probe step | Goal rate | Intervention rate | λ |
+|---|---|---|---|
+| 50k | 96% | 7.20% | 0.12 |
+| **100k** | **99%** | 7.45% | 0.21 |
+| 150k | 95% | 5.30% | 0.37 |
+| 200k | 48% | 1.71% | 0.49 |
+| 250k | 22% | 2.44% | 0.66 |
+| 300k | 93% | 3.65% | 0.82 |
+| 350k | 93% | 3.89% | 0.97 |
+| **400k** | **94%** | **3.95%** | 1.10 |
+
+It stopped at 400k on no-improvement (the 100k probe was not beaten in six
+tries). Two things in that table matter more than the stop:
+
+1. **On the probes, the constraint looked like it had worked.** As λ climbed,
+   the probe intervention rate fell from 7.45% to under 4%, below the 5% target
+   the 2D policy never reached. The held-out evaluation below does not confirm
+   the level: the same 400k weights measure 7.73% and 9.54% over 500 episodes.
+   What it does confirm is the direction — 400k intervenes less than 100k under
+   both conditions.
+2. **It went through a collapse on the way.** At 200–250k, goal rate fell to 22%
+   while interventions hit their lowest: the policy briefly bought constraint
+   satisfaction by giving up on the task, then recovered to 93–94% at a lower
+   intervention rate than it started with. The same failure mode phase 6b
+   diagnosed, this time transient rather than terminal.
+
+![stage C training curves](saferl/eval/space3d/long/space3d_training.png)
+
+Selection picks on probe goal rate alone, so it chose the 100k checkpoint (99%,
+but 7.45% interventions) over the 400k one (94%, 3.95%). That is limitation 3
+from the 2D work showing up again. Both were given the full held-out evaluation.
+
+### Held-out evaluation
+
+500 episodes, seed 42, deterministic, limited sensing, real goal. Both
+difficulty conditions, as phase 10 established.
+
+| Checkpoint | Condition | Goal rate | Intervention rate | Collisions |
+|---|---|---|---|---|
+| **100k — selected** (`saferl_space3d_best.zip`) | mixed-curriculum | **92.6%** | **10.29%** | 0 |
+| **100k — selected** | **full fixed 12-hazard** | **81.2%** | **11.97%** | 0 |
+| 400k — final (`saferl_space3d.zip`) | mixed-curriculum | 89.8% | 7.73% | 0 |
+| 400k — final | full fixed 12-hazard | 76.6% | 9.54% | 0 |
+
+Outputs, with checkpoint md5s: [`saferl/eval/space3d/heldout/`](saferl/eval/space3d/heldout/).
+
+**The reported 3D checkpoint is the 100k one**, because that is what the
+selection rule — fixed before training, and the same one phase 9 used —
+picks. Choosing the 400k checkpoint after seeing these numbers would be
+selecting on the test set. The 400k row is reported beside it because the
+trade is real and worth seeing: about 3–5pp of goal rate for 2.4–2.6pp fewer
+interventions.
+
+**0 collisions in all 2000 episodes**, as in every 2D evaluation. The shield
+result carries into 3D intact.
+
+**The 5% intervention target is not met in 3D either**, and 3D intervenes more
+than 2D (10–12% against 6–7%). That is expected rather than surprising: twelve
+hazards moving on three axes put the agent inside a shield trigger more often
+than five on a plane, even at a matched encounter rate along the ideal path.
+
+**Probe optimism again, and larger.** The 100k probe read 99% goal and 7.45%
+interventions; held out, 81.2% and 11.97% at full difficulty. The 400k probe's
+3.95% became 9.54%. Limitation 3 from 2D holds, more strongly: a 100-episode
+probe at seed 7 is a selection signal, not a measurement, and no number in this
+section is taken from one.
+
+**"Mixed-curriculum" is milder in 3D than in 2D.** The hazard ramp is
+`1 + episode // 50`, which reaches 12 hazards only at episode 550, so a
+500-episode run *never* reaches full 3D difficulty (in 2D it reached 5 at
+episode 200). The full fixed 12-hazard row is the one that matches the scene,
+and the one to quote.
+
+### The Unreal scene: rendered as space
+
+**Its own level.** The editor used to open the default Open World template on
+every launch, whose Landscape was the checkerboard floor. The session now
+generates `/Game/Maps/SpaceLevel` with `LevelEditorSubsystem.new_level` on first
+boot and loads it thereafter, so there is no Landscape, fog or HLOD by
+construction. The generated `.umap` is gitignored like the other generated assets.
+
+**Driven by the config.** `run_ue_demo.sh --config` reads the config with the
+venv's Python (UE's embedded 3.11 cannot be assumed to have PyYAML) and passes
+dims, rock count and field size to the scene, so 12 rocks, a 3D goal and
+3D mirroring all follow from `space3d.yaml`.
+
+**Motion.** The bridge now publishes velocity. The satellite turns to face its
+smoothed velocity and each rock tumbles slowly. **Both are visual only** — the
+env simulates point masses — and are stated here so they are not mistaken for
+simulated attitude dynamics.
+
+**Cameras.** A wide shot framing the whole cube side-on to the start→goal
+diagonal, and a chase camera trailing the satellite. Switch live:
+
+```bash
+echo chase > ue_spike/camera_mode
+```
+
+`--camera wide|chase` picks the starting view. The scene capture follows the
+active camera, so captures match the screen.
+
+**Stars — and a correction to phase 10.** Phase 10 attributed the unreadable
+starmap to stars falling below one rendered pixel on a 50,000-unit dome. That
+explanation does not hold: seen from near a dome's centre, angular resolution
+does not depend on its radius, and 4096 px over 360° is ~11 px per degree
+against ~21 on screen — stars are *magnified*, not subpixel. Phase 11 also
+ruled out the next likely cause, exposure: under locked manual exposure,
+raising the starmap's emissive gain 33× (60 → 2000) still produced no stars,
+only a brighter smear and the dome's tessellation seams. **The actual cause was
+not isolated**; the texture's sampling path inside UE is the remaining suspect,
+and chasing it further was judged poor value.
+
+Instead, stars are drawn as geometry: **1500 procedural point stars** — seeded
+positions, uniform on the sphere with a denser tilted band standing in for the
+galactic plane, most of them faint — as tiny unlit emissive spheres on a 400 m
+shell. **They are procedural, not catalogue positions**, and the asset report
+says so. The textured dome is hidden in the space level. Measured on a capture:
+848 isolated point peaks, median brightness 211/255.
+
+The goal is now an unlit emissive beacon (under the space sun a default grey
+sphere rendered near-black), and the sun is a single directional light under
+locked manual exposure.
+
+![the 3D space scene, wide camera](ue_spike/demo_capture/space3d_wide_scene.png)
+
+**The phase 8c "sphere rock" is gone.** All 12 rocks render as rock meshes in
+the new level; the issue did not survive leaving the template.
+
+### The demo, run end to end
+
+```bash
+./run_ue_demo.sh --config saferl/configs/space3d.yaml --camera chase
+```
+
+Recorded with the selected checkpoint at full 12-hazard difficulty: 40 frames,
+one every 45 steps, on the chase camera for the first 20 and switched live to
+the wide camera for the rest. That run scored **16/18 goals (88.9%), 0
+collisions**, in line with the 81.2% measured over 500 episodes. Its console
+log is kept alongside the capture.
+
+![the trained 3D policy in Unreal: chase camera, then wide](ue_spike/demo_capture/space3d_demo.gif)
+
+| Chase camera | Wide camera |
+|---|---|
+| ![chase](ue_spike/demo_capture/space3d_chase_frame.png) | ![wide](ue_spike/demo_capture/space3d_wide_frame.png) |
+
+### Files
+
+- `saferl/configs/space3d.yaml` — the 3D config (`dims: 3`, 12 hazards, goal curriculum)
+- `saferl/env/base_env.py` — `dims`, the 3D thrust table, the goal curriculum
+- `saferl/shield/safety_shield.py` — thrust-table-driven action model, z propagation
+- `saferl/eval/stress_test.py` — the 3D scenario set
+- `tests/test_env_3d.py`, `tests/test_shield_3d.py`
+- `saferl/eval/space3d/` — every run above, including the failed A0: episode CSVs, curves, summaries, probes, checkpoints
+- `ue_spike/Content/Python/pie_session.py`, `run_ue_demo.sh` — the space level, cameras, stars, 3D mirroring
