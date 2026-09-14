@@ -476,6 +476,29 @@ def _import_starmap_texture():
     return texture
 
 
+def _ensure_nanite_usage(material, content_path):
+    """Make sure the starmap material carries the Nanite usage flag, saved.
+
+    The sky dome mesh is imported from OBJ with UE's default Nanite setting,
+    and a material applied to a Nanite mesh needs bUsedWithNanite. Without
+    it the editor patches the flag in memory at load and logs a MapCheck
+    warning; a cooked build cannot patch it and falls back to the default
+    material. This material is generated here and its .uasset is gitignored,
+    so the flag has to be set by this script -- clicking the editor's "Fix"
+    would only repair the local copy until the next fresh build.
+    """
+    try:
+        if material.get_editor_property("used_with_nanite"):
+            _log(f"starmap material already has Nanite usage flag: {content_path}")
+            return
+        material.set_editor_property("used_with_nanite", True)
+        unreal.MaterialEditingLibrary.recompile_material(material)
+        unreal.EditorAssetLibrary.save_asset(content_path)
+        _log(f"set + saved Nanite usage flag on {content_path}")
+    except Exception as e:
+        _log(f"WARNING: could not set Nanite usage flag on {content_path}: {e!r}")
+
+
 def _get_or_create_starmap_material(texture):
     """Build (or reuse) an unlit emissive material that shows `texture`
     directly regardless of scene lighting -- the standard technique for a
@@ -483,6 +506,7 @@ def _get_or_create_starmap_material(texture):
     content_path = f"{TEXTURES_CONTENT_PATH}/M_Starmap_Sky"
     existing = unreal.EditorAssetLibrary.load_asset(content_path)
     if existing is not None:
+        _ensure_nanite_usage(existing, content_path)
         return existing
 
     asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
@@ -513,6 +537,10 @@ def _get_or_create_starmap_material(texture):
 
     unreal.MaterialEditingLibrary.connect_material_property(
         mult, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    try:
+        material.set_editor_property("used_with_nanite", True)
+    except Exception as e:
+        _log(f"WARNING: could not set Nanite usage flag on new starmap material: {e!r}")
     unreal.MaterialEditingLibrary.recompile_material(material)
     unreal.EditorAssetLibrary.save_asset(content_path)
     _log(f"built unlit starmap material: {content_path}")
