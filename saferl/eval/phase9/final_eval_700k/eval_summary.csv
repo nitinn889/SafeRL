@@ -1,0 +1,2 @@
+checkpoint,checkpoint_md5,n_episodes,seed,deterministic,sensor_range,goal_rate,intervention_rate,goals,collisions,total_interventions,total_steps
+saferl/eval/phase9/saferl_phase9.zip,c05627be02b6c240187eace2e23acd91,500,42,True,,0.752,0.02733,376,0,5618,205546

@@ -109,7 +109,21 @@ SKYBOX_SRC_DIR = os.path.join(MESH_DIR, "skybox")
 UNCAP_FRAMERATE = os.environ.get("SAFERL_UNCAP") == "1"
 STEPS_PER_TICK = int(os.environ.get("SAFERL_STEPS_PER_TICK", "1"))
 RESULTS_NAME = os.environ.get("SAFERL_RESULTS_NAME", "pie_session_results.json")
+
+# Live-mirror mode: instead of running the scripted 500-step benchmark with
+# the move-toward-goal heuristic, poll a state file published by
+# saferl.demo.live_policy_bridge and move the UE actors to match a real
+# trained-policy rollout running in a separate process. Separate process
+# because UE 5.8 embeds Python 3.11 and this project's venv is 3.14 --
+# torch/SB3 cannot be imported into UE's interpreter at all.
+LIVE_POLICY = os.environ.get("SAFERL_LIVE_POLICY") == "1"
+LIVE_STATE_NAME = os.environ.get("SAFERL_LIVE_STATE", "live_policy_state.json")
+# Frames between live-mode screenshots; 0 disables. A SceneCapture2D
+# re-render is expensive (phase 3 measured it dragging the loop from ~119 to
+# ~6 steps/sec when left on every frame), so this is deliberately sparse.
+LIVE_CAPTURE_EVERY = int(os.environ.get("SAFERL_LIVE_CAPTURE_EVERY", "450"))
 RESULTS_PATH = os.path.normpath(os.path.join(_HERE, "..", "..", RESULTS_NAME))
+LIVE_STATE_PATH = os.path.normpath(os.path.join(_HERE, "..", "..", LIVE_STATE_NAME))
 
 SPHERE = "/Engine/BasicShapes/Sphere.Sphere"
 CUBE = "/Engine/BasicShapes/Cube.Cube"
@@ -835,6 +849,63 @@ def _find_satellite_in_pie():
     return game_world, actors[0]
 
 
+def _find_debris_in_pie(game_world):
+    """Debris actors ordered by label, so index i here is always the same
+    piece of debris as index i in the published state. get_all_actors_with_tag
+    makes no ordering guarantee, so sorting by our own label is what keeps
+    the mapping stable across ticks."""
+    actors = unreal.GameplayStatics.get_all_actors_with_tag(game_world, DEBRIS_TAG)
+    return sorted(actors, key=lambda a: a.get_actor_label())
+
+
+def _live_mirror_tick():
+    """Poll the bridge's state file and move UE actors to match.
+
+    Deliberately tolerant: the writer publishes atomically (tmp + rename) but
+    this still runs on a different process's schedule, so a missing or
+    momentarily unreadable file is normal and must not kill the tick callback.
+    """
+    st = _state
+    try:
+        with open(LIVE_STATE_PATH) as f:
+            frame = json.load(f)
+    except Exception:
+        return  # bridge not up yet, or mid-rename; try again next tick
+
+    if frame.get("t") == st.get("live_last_t"):
+        return  # no new frame since last tick; nothing to move
+    st["live_last_t"] = frame.get("t")
+
+    bridge = st["bridge"]
+    agent = frame.get("agent")
+    if agent:
+        bridge.actor.set_actor_location(_env_to_world(agent), False, False)
+
+    debris_actors = st.get("live_debris_actors") or []
+    for i, pos in enumerate(frame.get("debris", [])):
+        if i < len(debris_actors):
+            debris_actors[i].set_actor_location(_env_to_world(pos), False, False)
+
+    ep = frame.get("episode")
+    if ep != st.get("live_last_episode"):
+        st["live_last_episode"] = ep
+        _log(f"live: episode {ep} started")
+    st["live_frames"] = st.get("live_frames", 0) + 1
+    if st["live_frames"] % 300 == 0:
+        _log(f"live: ep {ep} step {frame.get('ep_step')} "
+             f"interventions={frame.get('interventions')} "
+             f"reward={frame.get('ep_reward')}")
+
+    # Periodic capture so the run leaves visual evidence of the satellite
+    # actually moving, rather than only a position number in a log. Alternating
+    # filenames means any two consecutive captures can be compared directly.
+    if LIVE_CAPTURE_EVERY and st["live_frames"] % LIVE_CAPTURE_EVERY == 0:
+        slot = (st["live_frames"] // LIVE_CAPTURE_EVERY) % 2
+        capture_png(bridge.world, f"live_policy_capture_{slot}.png")
+        _log(f"live: captured live_policy_capture_{slot}.png at "
+             f"ep {ep} step {frame.get('ep_step')} agent={agent}")
+
+
 def _finish():
     elapsed = time.perf_counter() - _state["t0"]
     result = {
@@ -925,11 +996,26 @@ def _on_tick(delta_seconds):
             _state["bridge"].reset()
             if UNCAP_FRAMERATE:
                 _uncap_framerate(game_world)
+
+            if LIVE_POLICY:
+                _state["live_debris_actors"] = _find_debris_in_pie(game_world)
+                _log(f"LIVE POLICY MODE: mirroring {LIVE_STATE_PATH}")
+                _log(f"live: found {len(_state['live_debris_actors'])} debris actors "
+                     f"to mirror")
+                _log("live: waiting for the policy bridge to publish frames "
+                     "(start saferl.demo.live_policy_bridge if it isn't running)")
+                _state["phase"] = "live_mirror"
+                return
+
             _log(f"protocol: {NUM_STEPS} steps, steps_per_tick={STEPS_PER_TICK}, "
                  f"uncapped={UNCAP_FRAMERATE}")
             _state["run_start_tick"] = _state["ticks"]
             _state["t0"] = time.perf_counter()
             _state["phase"] = "running"
+            return
+
+        if _state["phase"] == "live_mirror":
+            _live_mirror_tick()
             return
 
         if _state["phase"] == "posing":

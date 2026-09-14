@@ -1864,9 +1864,9 @@ with custom callbacks to capture the dual-critic signals:
 - `train/cost_critic_loss` — MSE on cost-value predictions
 
 **Live dashboard during run:**
-TensorBoard event file written to `saferl/eval/phase9/run_events/`. View with:
+TensorBoard event file written to `saferl/eval/phase9/tb/`. View with:
 ```bash
-tensorboard --logdir saferl/eval/phase9/run_events/
+tensorboard --logdir saferl/eval/phase9/tb/
 ```
 Curves extend in real time as training progresses (sampled every 1–2 updates).
 
@@ -1947,7 +1947,7 @@ All **40 tests pass** (unchanged from phase 8). Added:
 - `saferl/eval/phase9/convergence_probes.csv` — all 14 probes, timestamps,
   best-checkpoint tracking
 - `saferl/eval/phase9/final_eval/` — authoritative eval output (CSV, summary)
-- TensorBoard event logs in `run_events/` (gitignored; 500MB+)
+- TensorBoard event logs in `saferl/eval/phase9/tb/` (gitignored)
 
 ### What Phase 10 should assume
 
