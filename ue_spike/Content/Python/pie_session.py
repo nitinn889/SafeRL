@@ -118,12 +118,13 @@ DEBRIS_TAG = "SafeRLDebris"
 GOAL_TAG = "SafeRLGoal"
 CAPTURE_TAG = "SafeRLCapture"
 SKY_TAG = "SafeRLSky"
+STAR_TAG = "SafeRLStar"
 LIGHT_TAG = "SafeRLLight"
 CAMERA_TAG = "SafeRLCamera"
 POSTFX_TAG = "SafeRLPostFX"
 PLAYER_START_TAG = "SafeRLPlayerStart"
 ALL_TAGS = (SATELLITE_TAG, SATELLITE_PART_TAG, DEBRIS_TAG, GOAL_TAG,
-            CAPTURE_TAG, SKY_TAG, LIGHT_TAG, CAMERA_TAG, POSTFX_TAG,
+            CAPTURE_TAG, SKY_TAG, STAR_TAG, LIGHT_TAG, CAMERA_TAG, POSTFX_TAG,
             PLAYER_START_TAG)
 
 NUM_STEPS = 500
@@ -229,6 +230,25 @@ MOON_ROCK_NAMES = ["moon_rock_03", "moon_rock_04", "moon_rock_05",
 STARMAP_EXR_NAME = "nasa_starmap_2020_4k"
 # Emissive gain on the starmap; see _get_or_create_starmap_material.
 STARMAP_EMISSIVE_GAIN = float(os.environ.get("SAFERL_STARMAP_GAIN", "60.0"))
+# The goal is a beacon, not a lit object: under the dim space sun a default
+# grey sphere rendered near-black. Unlit emissive keeps it readable at any
+# exposure; this scales its brightness.
+GOAL_EMISSIVE_GAIN = float(os.environ.get("SAFERL_GOAL_GAIN", "3.0"))
+EMISSIVE_BASE_MATERIAL = "M_Emissive_Unlit"
+
+# Point stars (3D space level only). Phase 11 measured the NASA dome texture
+# reading as a dim smear rather than stars even at 33x emissive gain, so stars
+# are drawn as geometry instead: tiny unlit emissive spheres on a shell inside
+# the dome. These are PROCEDURAL, not catalogue positions -- seeded, uniform
+# on the sphere with a denser tilted band standing in for the galactic plane,
+# and most stars faint, as real star counts are. The NASA dome stays behind
+# them as the diffuse glow.
+NUM_STARS = int(os.environ.get("SAFERL_NUM_STARS", "1500"))
+STAR_SHELL_CM = 40000.0
+# (share of stars, diameter cm, emissive gain). At 400 m and ~21 px/deg on a
+# 1920 px frame, 60 cm is ~2 px and 140 cm ~4 px.
+STAR_TIERS = ((0.70, 60.0, 1.5), (0.25, 90.0, 5.0), (0.05, 140.0, 20.0))
+STAR_TINTS = ((0.75, 0.85, 1.0), (1.0, 1.0, 1.0), (1.0, 0.9, 0.7), (1.0, 0.75, 0.5))
 # The gain is a material parameter, set on a material instance each launch, so
 # it can be tuned without rebuilding the material. "_v2" because the first
 # version baked the gain in as a constant.
@@ -618,6 +638,84 @@ def _get_or_create_starmap_material(texture):
     return inst
 
 
+def _get_or_create_emissive_instance(inst_name, color, gain):
+    """Unlit emissive Color x Gain. One shared base material; each use gets
+    its own constant instance (editor Python has no
+    MaterialInstanceDynamic.create). Unlit, so it reads at any exposure."""
+    mel = unreal.MaterialEditingLibrary
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    base_path = f"{TEXTURES_CONTENT_PATH}/{EMISSIVE_BASE_MATERIAL}"
+    base = unreal.EditorAssetLibrary.load_asset(base_path)
+    if base is None:
+        base = tools.create_asset(EMISSIVE_BASE_MATERIAL, TEXTURES_CONTENT_PATH,
+                                  unreal.Material, unreal.MaterialFactoryNew())
+        base.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+        col = mel.create_material_expression(
+            base, unreal.MaterialExpressionVectorParameter, -350, 0)
+        col.set_editor_property("parameter_name", "Color")
+        col.set_editor_property("default_value", unreal.LinearColor(1.0, 1.0, 1.0, 1.0))
+        g = mel.create_material_expression(
+            base, unreal.MaterialExpressionScalarParameter, -350, 200)
+        g.set_editor_property("parameter_name", "Gain")
+        g.set_editor_property("default_value", 1.0)
+        mult = mel.create_material_expression(
+            base, unreal.MaterialExpressionMultiply, -170, 0)
+        mel.connect_material_expressions(col, "", mult, "A")
+        mel.connect_material_expressions(g, "", mult, "B")
+        mel.connect_material_property(mult, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+        mel.recompile_material(base)
+        unreal.EditorAssetLibrary.save_asset(base_path)
+        _log(f"built unlit emissive material: {base_path}")
+    inst_path = f"{TEXTURES_CONTENT_PATH}/{inst_name}"
+    inst = unreal.EditorAssetLibrary.load_asset(inst_path)
+    if inst is None:
+        inst = tools.create_asset(inst_name, TEXTURES_CONTENT_PATH,
+                                  unreal.MaterialInstanceConstant,
+                                  unreal.MaterialInstanceConstantFactoryNew())
+        mel.set_material_instance_parent(inst, base)
+    mel.set_material_instance_vector_parameter_value(
+        inst, "Color", unreal.LinearColor(color[0], color[1], color[2], 1.0))
+    mel.set_material_instance_scalar_parameter_value(inst, "Gain", gain)
+    mel.update_material_instance(inst)
+    unreal.EditorAssetLibrary.save_asset(inst_path)
+    return inst
+
+
+def _spawn_star_field(subsys, center):
+    """NUM_STARS procedural point stars on a shell around `center`."""
+    import math
+    rng = random.Random(4242)
+    sphere = unreal.EditorAssetLibrary.load_asset(SPHERE)
+    mats = {(tier, t): _get_or_create_emissive_instance(f"MI_Star_{tier}_{t}", tint, gain)
+            for tier, (_, _, gain) in enumerate(STAR_TIERS)
+            for t, tint in enumerate(STAR_TINTS)}
+    cum = [sum(x[0] for x in STAR_TIERS[:k + 1]) for k in range(len(STAR_TIERS))]
+    tilt = math.radians(60.0)
+    for _ in range(NUM_STARS):
+        u = rng.random()
+        tier = next(k for k, c in enumerate(cum) if u < c or k == len(cum) - 1)
+        z = rng.uniform(-1.0, 1.0)
+        if rng.random() < 0.35:          # the band
+            z *= 0.12
+        phi = rng.uniform(0.0, 2.0 * math.pi)
+        r = math.sqrt(max(0.0, 1.0 - z * z))
+        x, y = r * math.cos(phi), r * math.sin(phi)
+        y, z = y * math.cos(tilt) - z * math.sin(tilt), y * math.sin(tilt) + z * math.cos(tilt)
+        loc = unreal.Vector(center.x + x * STAR_SHELL_CM, center.y + y * STAR_SHELL_CM,
+                            center.z + z * STAR_SHELL_CM)
+        star = subsys.spawn_actor_from_class(unreal.StaticMeshActor, loc)
+        star.tags = [STAR_TAG]
+        comp = star.static_mesh_component
+        comp.set_static_mesh(sphere)
+        comp.set_material(0, mats[(tier, rng.randrange(len(STAR_TINTS)))])
+        comp.set_editor_property("cast_shadow", False)
+        comp.set_mobility(unreal.ComponentMobility.STATIC)
+        scale = STAR_TIERS[tier][1] / 100.0 * rng.uniform(0.85, 1.15)
+        star.set_actor_scale3d(unreal.Vector(scale, scale, scale))
+    _log(f"star field: {NUM_STARS} procedural point stars on a "
+         f"{STAR_SHELL_CM / 100:.0f} m shell")
+
+
 def _measure_and_rescale(actor, target_max_dim_cm):
     """Measure an actor's real bounding box (at scale 1,1,1) and apply a
     uniform scale so its longest dimension equals target_max_dim_cm.
@@ -743,7 +841,12 @@ def _camera_pose(mode):
     span = ENV_SIZE * SCALE
     c = span / 2.0
     if DIMS == 3:
-        loc = unreal.Vector(-0.55 * span, -0.35 * span, 1.1 * span)
+        # Side-on to the start->goal diagonal, slightly above, far enough that
+        # the diagonal's +-0.87 span fits inside the vertical half-FOV (~29 deg
+        # at 90 deg horizontal, 16:9). The first pose, from above one corner,
+        # left the start corner 36 deg off-axis and the satellite out of shot.
+        d = 1.9 * span
+        loc = unreal.Vector(c + 0.55 * d, c - 0.80 * d, c + 0.25 * d)
         target = unreal.Vector(c, c, c)
     else:
         loc = unreal.Vector(-0.55 * span, -0.35 * span, 0.9 * span)
@@ -870,6 +973,17 @@ def build_scene():
         asset_report["sky"] = "FALLBACK (starmap EXR not available)"
         _log("spawned sky dome WITHOUT real starmap texture (fallback material)")
 
+    if SPACE_LEVEL:
+        try:
+            _spawn_star_field(subsys, sky.get_actor_location())
+            # With point stars in place the textured dome adds nothing but
+            # its tessellation seams, so it is hidden in the space level.
+            sky.set_actor_hidden_in_game(True)
+            asset_report["sky"] = ("procedural point stars (NASA starmap dome hidden: "
+                                   "it renders as a dim smear, not stars)")
+        except Exception as e:
+            _log(f"WARNING: star field not spawned: {e!r}")
+
     # ── satellite: real NASA ACE model, composite fallback ──
     real_sat_mesh = _import_real_satellite()
     if real_sat_mesh is not None:
@@ -887,6 +1001,12 @@ def build_scene():
     goal_comp = goal.static_mesh_component
     goal_comp.set_static_mesh(unreal.EditorAssetLibrary.load_asset(SPHERE))
     goal_comp.set_mobility(unreal.ComponentMobility.MOVABLE)
+    try:
+        goal_comp.set_material(0, _get_or_create_emissive_instance(
+            "MI_Goal_Beacon", (0.15, 1.0, 0.35), GOAL_EMISSIVE_GAIN))
+        _log(f"goal beacon material applied, gain {GOAL_EMISSIVE_GAIN}")
+    except Exception as e:
+        _log(f"WARNING: goal beacon material not applied: {e!r}")
     goal.set_actor_scale3d(unreal.Vector(1.5, 1.5, 1.5))
     _log("spawned goal marker")
 
