@@ -1,0 +1,2 @@
+arm,episodes,last_rate,last_task_reward,last_ivs_per_ep,last_fallbacks_per_ep,last_steps,goals,collisions,final_lambda,goal_rate_pct,stopped_at,stop_reason,best_probe_goal_rate,best_probe_timestep
+phase9,1000,0.11769385,26.702,48.9,0.15,487.98,858,0,1.0981,85.8,400000,no improvement: best probe goal rate (99.0%) not beaten for 6 consecutive probes,0.99,100000
