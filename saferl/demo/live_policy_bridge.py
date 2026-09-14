@@ -64,6 +64,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--checkpoint", required=True)
+    ap.add_argument("--config", default=None,
+                    help="Config YAML (default: planar default.yaml; "
+                         "saferl/configs/space3d.yaml for 3D free flight)")
     ap.add_argument("--state-file", default=DEFAULT_STATE_FILE)
     ap.add_argument("--fps", type=float, default=30.0,
                     help="env steps per second; the policy runs ~1000/s "
@@ -82,7 +85,7 @@ def main():
                          "episode 0, matching what the UE scene depicts.")
     args = ap.parse_args()
 
-    cfg = load_config(None)
+    cfg = load_config(args.config)
     env_cfg = dict(cfg["env"])
     if not args.curriculum:
         env_cfg["curriculum"] = False
@@ -137,6 +140,8 @@ def main():
                     "episode": episode,
                     "ep_step": ep_steps,
                     "agent": [float(x) for x in obs[0:3]],
+                    "agent_vel": [float(x) for x in obs[3:6]],
+                    "dims": int(raw.dims),
                     "goal": [float(x) for x in obs[6:9]],
                     "debris": [[float(c) for c in pos]
                                for pos in raw.hazard_positions],

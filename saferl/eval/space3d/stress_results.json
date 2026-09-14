@@ -1,0 +1,212 @@
+{
+  "closing_head_on_3d": {
+    "no_shield": {
+      "trials": 25,
+      "collisions": 25,
+      "intervention_caused_collisions": 0,
+      "mean_steps_survived": 26.0,
+      "mean_min_distance": 1.289,
+      "mean_interventions": 0.0,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 0.0,
+      "mean_self_endangering_interventions": 0.0
+    },
+    "old_random": {
+      "trials": 25,
+      "collisions": 25,
+      "intervention_caused_collisions": 22,
+      "mean_steps_survived": 27.0,
+      "mean_min_distance": 1.053,
+      "mean_interventions": 3.96,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 1.44,
+      "mean_self_endangering_interventions": 0.0
+    },
+    "new_least_restrictive": {
+      "trials": 25,
+      "collisions": 0,
+      "intervention_caused_collisions": 0,
+      "mean_steps_survived": 63.0,
+      "mean_min_distance": 2.273,
+      "mean_interventions": 11.0,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 0.0,
+      "mean_self_endangering_interventions": 0.0
+    }
+  },
+  "crossing_from_above": {
+    "no_shield": {
+      "trials": 25,
+      "collisions": 25,
+      "intervention_caused_collisions": 0,
+      "mean_steps_survived": 26.0,
+      "mean_min_distance": 1.107,
+      "mean_interventions": 0.0,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 0.0,
+      "mean_self_endangering_interventions": 0.0
+    },
+    "old_random": {
+      "trials": 25,
+      "collisions": 25,
+      "intervention_caused_collisions": 22,
+      "mean_steps_survived": 26.0,
+      "mean_min_distance": 1.172,
+      "mean_interventions": 4.0,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 1.68,
+      "mean_self_endangering_interventions": 0.0
+    },
+    "new_least_restrictive": {
+      "trials": 25,
+      "collisions": 0,
+      "intervention_caused_collisions": 0,
+      "mean_steps_survived": 63.0,
+      "mean_min_distance": 2.343,
+      "mean_interventions": 11.0,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 0.0,
+      "mean_self_endangering_interventions": 0.0
+    }
+  },
+  "crossing_from_below": {
+    "no_shield": {
+      "trials": 25,
+      "collisions": 25,
+      "intervention_caused_collisions": 0,
+      "mean_steps_survived": 26.0,
+      "mean_min_distance": 1.107,
+      "mean_interventions": 0.0,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 0.0,
+      "mean_self_endangering_interventions": 0.0
+    },
+    "old_random": {
+      "trials": 25,
+      "collisions": 25,
+      "intervention_caused_collisions": 24,
+      "mean_steps_survived": 26.0,
+      "mean_min_distance": 1.171,
+      "mean_interventions": 4.0,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 1.8,
+      "mean_self_endangering_interventions": 0.0
+    },
+    "new_least_restrictive": {
+      "trials": 25,
+      "collisions": 0,
+      "intervention_caused_collisions": 0,
+      "mean_steps_survived": 63.0,
+      "mean_min_distance": 2.343,
+      "mean_interventions": 11.0,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 0.0,
+      "mean_self_endangering_interventions": 0.0
+    }
+  },
+  "oblique_crossing": {
+    "no_shield": {
+      "trials": 25,
+      "collisions": 25,
+      "intervention_caused_collisions": 0,
+      "mean_steps_survived": 26.0,
+      "mean_min_distance": 1.107,
+      "mean_interventions": 0.0,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 0.0,
+      "mean_self_endangering_interventions": 0.0
+    },
+    "old_random": {
+      "trials": 25,
+      "collisions": 25,
+      "intervention_caused_collisions": 24,
+      "mean_steps_survived": 26.0,
+      "mean_min_distance": 1.172,
+      "mean_interventions": 4.0,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 2.16,
+      "mean_self_endangering_interventions": 0.0
+    },
+    "new_least_restrictive": {
+      "trials": 25,
+      "collisions": 0,
+      "intervention_caused_collisions": 0,
+      "mean_steps_survived": 62.0,
+      "mean_min_distance": 2.246,
+      "mean_interventions": 10.0,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 0.0,
+      "mean_self_endangering_interventions": 0.0
+    }
+  },
+  "vertical_pincer": {
+    "no_shield": {
+      "trials": 25,
+      "collisions": 25,
+      "intervention_caused_collisions": 0,
+      "mean_steps_survived": 26.0,
+      "mean_min_distance": 1.114,
+      "mean_interventions": 0.0,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 0.0,
+      "mean_self_endangering_interventions": 0.0
+    },
+    "old_random": {
+      "trials": 25,
+      "collisions": 25,
+      "intervention_caused_collisions": 22,
+      "mean_steps_survived": 26.0,
+      "mean_min_distance": 1.175,
+      "mean_interventions": 4.0,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 1.68,
+      "mean_self_endangering_interventions": 0.0
+    },
+    "new_least_restrictive": {
+      "trials": 25,
+      "collisions": 0,
+      "intervention_caused_collisions": 0,
+      "mean_steps_survived": 62.0,
+      "mean_min_distance": 2.223,
+      "mean_interventions": 9.0,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 0.0,
+      "mean_self_endangering_interventions": 0.0
+    }
+  },
+  "surrounded_6": {
+    "no_shield": {
+      "trials": 25,
+      "collisions": 25,
+      "intervention_caused_collisions": 0,
+      "mean_steps_survived": 13.0,
+      "mean_min_distance": 1.29,
+      "mean_interventions": 0.0,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 0.0,
+      "mean_self_endangering_interventions": 0.0
+    },
+    "old_random": {
+      "trials": 25,
+      "collisions": 18,
+      "intervention_caused_collisions": 18,
+      "mean_steps_survived": 44.3,
+      "mean_min_distance": 1.316,
+      "mean_interventions": 44.04,
+      "mean_fallback_interventions": 0.0,
+      "mean_toward_hazard_interventions": 20.88,
+      "mean_self_endangering_interventions": 0.0
+    },
+    "new_least_restrictive": {
+      "trials": 25,
+      "collisions": 0,
+      "intervention_caused_collisions": 0,
+      "mean_steps_survived": 60.0,
+      "mean_min_distance": 1.992,
+      "mean_interventions": 60.0,
+      "mean_fallback_interventions": 60.0,
+      "mean_toward_hazard_interventions": 30.0,
+      "mean_self_endangering_interventions": 0.0
+    }
+  }
+}

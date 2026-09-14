@@ -141,8 +141,12 @@ class ConvergenceCallback(BaseCallback):
 
     def __init__(self, eval_every, eval_episodes, eval_seed, patience,
                  goal_tol, iv_tol, out_dir, no_improve_patience=6,
-                 best_ckpt_path=None, verbose=1):
+                 best_ckpt_path=None, config_path=None, verbose=1):
         super().__init__(verbose)
+        # Probes must build the same env the model trains on. Without this
+        # they always loaded the planar default config, which is harmless for
+        # a planar run and fatal for a 3D one (81-wide policy, 39-wide env).
+        self.config_path = config_path
         self.eval_every = eval_every
         self.eval_episodes = eval_episodes
         self.eval_seed = eval_seed
@@ -171,6 +175,7 @@ class ConvergenceCallback(BaseCallback):
             seed=self.eval_seed,
             deterministic=True,
             preserve_rng=True,
+            config_path=self.config_path,
         )
         gr, ivr = result["goal_rate"], result["intervention_rate"]
 
@@ -373,9 +378,17 @@ def main():
     ap.add_argument("--no-improve-patience", type=int, default=6,
                     help="Stop if the best probe goal rate is not beaten for "
                          "this many consecutive probes")
+    ap.add_argument("--config", default=None,
+                    help="Config YAML (default: planar default.yaml). Used for "
+                         "training AND for the convergence probes.")
+    ap.add_argument("--run-name", default="phase9",
+                    help="Prefix for saved checkpoints, CSVs and the "
+                         "TensorBoard run (default keeps phase 9's names)")
     args = ap.parse_args()
 
-    cfg = load_config()
+    cfg = load_config(args.config)
+    print(f"config={args.config or 'default.yaml'}  dims={cfg['env'].get('dims', 2)}  "
+          f"hazards={cfg['env']['max_hazards']}  run_name={args.run_name}")
     device = args.device or cfg["training"].get("device", "cpu")
     ccfg = cfg.get("constrained", {})
     sensor_range = cfg["env"].get("sensor_range", 6.0)
@@ -416,8 +429,9 @@ def main():
         goal_tol=args.goal_tol,
         iv_tol=args.iv_tol,
         no_improve_patience=args.no_improve_patience,
-        best_ckpt_path=str(out / "saferl_phase9_best.zip"),
+        best_ckpt_path=str(out / f"saferl_{args.run_name}_best.zip"),
         out_dir=out,
+        config_path=args.config,
     )
 
     print(f"\nTraining (ceiling {args.max_timesteps} steps, "
@@ -425,13 +439,13 @@ def main():
     model.learn(
         total_timesteps=args.max_timesteps,
         callback=[ep_cb, metrics_cb, conv_cb],
-        tb_log_name="phase9",
+        tb_log_name=args.run_name,
         reset_num_timesteps=True,
     )
 
-    write_csv(ep_cb.rows, out / "phase9_episodes.csv")
+    write_csv(ep_cb.rows, out / f"{args.run_name}_episodes.csv")
     conv_cb.write_probes()
-    model.save(out / "saferl_phase9.zip")
+    model.save(out / f"saferl_{args.run_name}.zip")
 
     s = summarise("phase9", ep_cb.rows)
     s["stopped_at"] = conv_cb.converged_at or "hit ceiling"
@@ -445,14 +459,14 @@ def main():
           f"lambda={s['final_lambda']}")
     print(f"[phase9] stopped at {s['stopped_at']} -- {s['stop_reason']}")
     print(f"[phase9] best probe {conv_cb.best_goal*100:.1f}% goal at step "
-          f"{s['best_probe_timestep']} -> saferl_phase9_best.zip")
+          f"{s['best_probe_timestep']} -> saferl_{args.run_name}_best.zip")
 
     with open(out / "summary.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(s.keys()))
         w.writeheader()
         w.writerow(s)
 
-    plot_phase9(ep_cb.rows, conv_cb.probes, out / "phase9_training.png")
+    plot_phase9(ep_cb.rows, conv_cb.probes, out / f"{args.run_name}_training.png")
     venv.close()
 
 

@@ -17,7 +17,8 @@ import numpy as np
 import pybullet as p
 
 from saferl.env.base_env import (
-    ACTION_THRUST_DIRS, AGENT_MASS, OBS_HEADER_LEN, OBS_PER_HAZARD, SafeNav3DEnv,
+    ACTION_THRUST_DIRS_3D, AGENT_MASS, OBS_HEADER_LEN, OBS_PER_HAZARD, SafeNav3DEnv,
+    thrust_dirs,
 )
 from saferl.shield.safety_shield import (
     DEFAULT_ACCEL, RandomReplacementShield, SafetyShield,
@@ -65,7 +66,7 @@ def _agent_position_at(scn, t, accel):
     """Un-shielded agent position at time t: p0 + v0 t + 0.5 a t^2."""
     p0 = np.array(scn.agent_pos, dtype=np.float64)
     v0 = np.array(scn.agent_vel, dtype=np.float64)
-    a = ACTION_THRUST_DIRS[scn.intent_action] * accel
+    a = ACTION_THRUST_DIRS_3D[scn.intent_action] * accel
     return p0 + v0 * t + 0.5 * a * t * t
 
 
@@ -79,7 +80,7 @@ def _time_to_travel(scn, distance, accel):
     """
     if distance <= 0:
         return 0.0
-    u = ACTION_THRUST_DIRS[scn.intent_action]
+    u = ACTION_THRUST_DIRS_3D[scn.intent_action]
     v = float(np.dot(np.array(scn.agent_vel, dtype=np.float64), u))
     if accel <= 0:
         if v <= 0:
@@ -88,7 +89,7 @@ def _time_to_travel(scn, distance, accel):
     return float((-v + np.sqrt(v * v + 2.0 * accel * distance)) / accel)
 
 
-def build_scenarios():
+def build_scenarios(dims=2):
     """Five encounters, chosen to separate distance-only from velocity-aware.
 
     `closing_head_on` and `crossing_*` are invisible to a distance-only
@@ -96,7 +97,14 @@ def build_scenarios():
     `parked_obstacle` is the control: a distance-only shield handles it fine.
     `pincer` is built so no single action stays clear -- it exercises the
     boxed-in fallback.
+
+    `dims=3` returns the free-flight set instead (see _free_flight_scenarios).
+    Actions are looked up in ACTION_THRUST_DIRS_3D throughout this module: its
+    first four rows are the planar table, so planar scenarios are unaffected
+    and a substituted +Z/-Z in 3D still resolves.
     """
+    if dims == 3:
+        return _free_flight_scenarios()
     return [
         Scenario(
             name="closing_head_on",
@@ -156,6 +164,67 @@ def build_scenarios():
     ]
 
 
+FREE_FLIGHT_Z = 5.0   # mid-volume: free flight has no floor to rest on
+
+
+def _free_flight_scenarios():
+    """3D encounters: the planar set's construction plus the vertical axis.
+
+    Hazards are timed to meet the agent's un-shielded +X path exactly as in
+    the planar set, with the agent mid-volume. The vertical cases are the
+    point: a hazard arriving from above or below is outside anything a planar
+    shield models, `vertical_pincer` is only escapable sideways, and
+    `surrounded_6` boxes the agent in on every axis.
+    """
+    start = (1.0, 5.0, FREE_FLIGHT_Z)
+    cruise = (1.0, 0.0, 0.0)
+    plus_x = 3
+
+    def crossing(name, description, approach_from):
+        return Scenario(
+            name=name, description=description,
+            agent_pos=start, agent_vel=cruise, intent_action=plus_x,
+            hazards=[HazardSpec(intercept_distance=5.0, approach_from=approach_from,
+                                speed=1.2)],
+        )
+
+    axes6 = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+    return [
+        crossing("closing_head_on_3d",
+                 "debris drifting straight back down the +X path, mid-volume",
+                 (1, 0, 0)),
+        crossing("crossing_from_above", "debris dropping across the path from +Z",
+                 (0, 0, 1)),
+        crossing("crossing_from_below", "debris rising across the path from -Z",
+                 (0, 0, -1)),
+        crossing("oblique_crossing",
+                 "debris cutting across from above and to the side at 45 degrees",
+                 (0, 1, 1)),
+        Scenario(
+            name="vertical_pincer",
+            description="hazards converging from above and below plus one "
+                        "ahead; the only escape is sideways",
+            agent_pos=start, agent_vel=cruise, intent_action=plus_x,
+            hazards=[
+                HazardSpec(intercept_distance=5.0, approach_from=(0, 0, 1), speed=1.4),
+                HazardSpec(intercept_distance=5.0, approach_from=(0, 0, -1), speed=1.4),
+                HazardSpec(intercept_distance=6.5, approach_from=(1, 0, 0), speed=1.0),
+            ],
+        ),
+        Scenario(
+            name="surrounded_6",
+            description="six stationary hazards boxing the agent in on every "
+                        "axis just inside safe_dist: every step is a fallback",
+            agent_pos=(5.0, 5.0, FREE_FLIGHT_Z), agent_vel=(0.0, 0.0, 0.0),
+            intent_action=plus_x,
+            hazards=[HazardSpec(intercept_distance=0.0, approach_from=d, speed=0.0,
+                                offset=tuple(2.0 * np.array(d, dtype=float)))
+                     for d in axes6],
+            steps=60,
+        ),
+    ]
+
+
 def _place(env, scn, accel):
     """Teleport agent and hazards into the scenario's opening state."""
     cid = env._client
@@ -171,15 +240,19 @@ def _place(env, scn, accel):
         u = u / (np.linalg.norm(u) or 1.0)
         vel = -u * spec.speed                       # travels toward the meeting point
         start = meet - vel * t_meet + np.array(spec.offset, dtype=np.float64)
-        _assert_in_play_area(scn, env.size, meet, start)
-        h_pos = [float(start[0]), float(start[1]), HAZARD_Z]
+        _assert_in_play_area(scn, env.size, meet, start, env._axes)
+        if env.dims == 3:
+            h_pos = [float(c) for c in start]
+            env.hazard_velocities[i] = [float(c) for c in vel]
+        else:
+            h_pos = [float(start[0]), float(start[1]), HAZARD_Z]
+            env.hazard_velocities[i] = [float(vel[0]), float(vel[1]), 0.0]
         env.hazard_positions[i] = h_pos
-        env.hazard_velocities[i] = [float(vel[0]), float(vel[1]), 0.0]
         p.resetBasePositionAndOrientation(env._hazard_ids[i], h_pos,
                                           [0, 0, 0, 1], physicsClientId=cid)
 
 
-def _assert_in_play_area(scn, size, meet, start):
+def _assert_in_play_area(scn, size, meet, start, axes=(0, 1)):
     """Fail loudly if a scenario places its encounter outside the field.
 
     Debris reflect off the [0, size] boundary, so a hazard placed outside it
@@ -188,9 +261,9 @@ def _assert_in_play_area(scn, size, meet, start):
     rather than a quietly passing test.
     """
     for label, pt in (("intercept point", meet), ("hazard start", start)):
-        if not all(0.0 <= float(pt[ax]) <= size for ax in (0, 1)):
+        if not all(0.0 <= float(pt[ax]) <= size for ax in axes):
             raise ValueError(
-                f"scenario {scn.name!r}: {label} {np.round(pt[:2], 2).tolist()} "
+                f"scenario {scn.name!r}: {label} {np.round(pt[:len(axes)], 2).tolist()} "
                 f"is outside the 0..{size} play area -- retune "
                 f"intercept_distance for the current force_mag"
             )
@@ -213,7 +286,7 @@ def _toward_hazard(obs, executed_action, hazard_index):
     n = np.linalg.norm(to_hazard)
     if n < 1e-9:
         return True
-    return bool(np.dot(ACTION_THRUST_DIRS[int(executed_action)], to_hazard / n) > 1e-9)
+    return bool(np.dot(ACTION_THRUST_DIRS_3D[int(executed_action)], to_hazard / n) > 1e-9)
 
 
 def run_episode(scn, shield, auditor, cfg_env, seed=0):
@@ -290,20 +363,23 @@ def run_comparison(trials=25, cfg=None, lookahead_steps=None, safe_dist=None):
     cfg_env = dict(cfg["env"])
     accel = cfg_env["force_mag"] / AGENT_MASS
     step_dt = cfg_env["sim_substeps"] / 240.0
+    dims = cfg_env.get("dims", 2)
+    dirs = thrust_dirs(dims)
 
     def new_shield():
         return SafetyShield(safe_dist=safe_dist, lookahead_steps=lookahead_steps,
-                            accel=accel, step_dt=step_dt)
+                            accel=accel, step_dt=step_dt, thrust_dirs=dirs)
 
     arms = {
         "no_shield": lambda seed: None,
         "old_random": lambda seed: RandomReplacementShield(
-            safe_dist=safe_dist, rng=np.random.RandomState(seed)),
+            safe_dist=safe_dist, rng=np.random.RandomState(seed),
+            n_actions=len(dirs)),
         "new_least_restrictive": lambda seed: new_shield(),
     }
 
     results = {}
-    for scn in build_scenarios():
+    for scn in build_scenarios(dims):
         results[scn.name] = {}
         for arm, factory in arms.items():
             runs = [run_episode(scn, factory(seed), new_shield(), cfg_env, seed=seed)
@@ -355,9 +431,14 @@ def main():
     ap.add_argument("--safe-dist", type=float, default=None,
                 help="default: config shield.safe_dist")
     ap.add_argument("--json-out", default=None)
+    ap.add_argument("--config", default=None,
+                    help="Config YAML (default: planar default.yaml; "
+                         "saferl/configs/space3d.yaml runs the 3D scenario set)")
     args = ap.parse_args()
 
-    results = run_comparison(trials=args.trials, lookahead_steps=args.lookahead_steps,
+    from saferl.config import load_config
+    results = run_comparison(trials=args.trials, cfg=load_config(args.config),
+                             lookahead_steps=args.lookahead_steps,
                              safe_dist=args.safe_dist)
     print(format_table(results))
     if args.json_out:

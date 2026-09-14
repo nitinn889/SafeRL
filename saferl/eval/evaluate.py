@@ -130,6 +130,7 @@ def evaluate(checkpoint_path: str, n_episodes: int = 500, seed: int = 42,
     # read without knowing which condition produced it.
     result["curriculum"] = bool(cfg["env"].get("curriculum"))
     result["max_hazards"] = cfg["env"].get("max_hazards")
+    result["dims"] = cfg["env"].get("dims", 2)
     return result, rows
 
 
@@ -208,6 +209,9 @@ def main():
                     help="Override sensor range (None = use config default)")
     ap.add_argument("--out-dir", default=None,
                     help="Save per-episode CSV here (default: no file output)")
+    ap.add_argument("--config", default=None,
+                    help="Config YAML (default: saferl/configs/default.yaml, the "
+                         "planar env). Use saferl/configs/space3d.yaml for 3D.")
     ap.add_argument("--no-curriculum", action="store_true",
                     help="Hold all max_hazards active from episode 0 (full "
                          "fixed difficulty). Without this the run inherits "
@@ -229,6 +233,7 @@ def main():
         seed=args.seed,
         deterministic=not args.stochastic,
         sensor_range=args.sensor_range,
+        config_path=args.config,
         curriculum=curriculum,
     )
 

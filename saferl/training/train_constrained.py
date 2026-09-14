@@ -207,7 +207,17 @@ def main():
     ap.add_argument("--out-dir", default="saferl/eval/phase6b")
     ap.add_argument("--checkpoint",
                      default="saferl/eval/phase6/saferl_unconstrained.zip",
-                     help="Unconstrained checkpoint to warm-start from")
+                     help="Checkpoint to warm-start from, or 'none' to train "
+                          "from scratch")
+    ap.add_argument("--config", default=None,
+                     help="Config YAML (default: the planar default.yaml)")
+    ap.add_argument("--lambda-max", type=float, default=None,
+                     help="Override constrained.lambda_max. 0 pins lambda at 0, "
+                          "which is unconstrained PPO through the same "
+                          "two-critic plumbing -- how a from-scratch pretrain "
+                          "is run without a separate trainer.")
+    ap.add_argument("--model-name", default="saferl_phase6b",
+                     help="Saved checkpoint file name (without .zip)")
     ap.add_argument("--target-start", type=float, default=0.25,
                      help="Curriculum start (loose budget)")
     ap.add_argument("--target-end", type=float, default=0.05,
@@ -216,10 +226,14 @@ def main():
                      help="Episodes for warm-start verification")
     args = ap.parse_args()
 
-    cfg = load_config()
+    cfg = load_config(args.config)
     device = args.device or cfg["training"].get("device", "cpu")
     ccfg = cfg.get("constrained", {})
+    lambda_max = (args.lambda_max if args.lambda_max is not None
+                  else ccfg.get("lambda_max", 5.0))
 
+    print(f"config={args.config or 'default.yaml'}  dims={cfg['env'].get('dims', 2)}  "
+          f"hazards={cfg['env']['max_hazards']}  lambda_max={lambda_max}")
     print(f"device={device}  timesteps={args.timesteps}  seed={args.seed}")
     print(f"curriculum: {args.target_start} -> {args.target_end}")
     print(f"checkpoint: {args.checkpoint}")
@@ -233,26 +247,29 @@ def main():
         target_rate_start=args.target_start,
         target_rate_end=args.target_end,
         constraint_lambda_lr=ccfg.get("lambda_lr", 0.1),
-        constraint_lambda_max=ccfg.get("lambda_max", 5.0),
+        constraint_lambda_max=lambda_max,
         constraint_ema_beta=ccfg.get("ema_beta", 0.9),
         verbose=1, device=device, seed=args.seed,
     )
 
-    # --- Warm-start ---
-    checkpoint = Path(args.checkpoint)
-    if not checkpoint.exists():
-        print(f"ERROR: checkpoint not found: {checkpoint}")
-        venv.close()
-        return
-    loaded, skipped = warm_start(model, str(checkpoint), device=device)
+    if args.checkpoint.lower() == "none":
+        print("\nNo warm-start: training from scratch.")
+    else:
+        # --- Warm-start ---
+        checkpoint = Path(args.checkpoint)
+        if not checkpoint.exists():
+            print(f"ERROR: checkpoint not found: {checkpoint}")
+            venv.close()
+            return
+        loaded, skipped = warm_start(model, str(checkpoint), device=device)
 
-    # --- Verify warm-start ---
-    print(f"\nVerifying warm-start ({args.eval_episodes} episodes, deterministic)...")
-    goal_rate = quick_eval(model, cfg, n_episodes=args.eval_episodes)
-    print(f"Warm-start goal rate: {goal_rate * 100:.1f}%")
-    if goal_rate < 0.30:
-        print("WARNING: warm-start goal rate < 30%, checkpoint may not have "
-              "loaded correctly. Proceeding but results may not be meaningful.")
+        # --- Verify warm-start ---
+        print(f"\nVerifying warm-start ({args.eval_episodes} episodes, stochastic)...")
+        goal_rate = quick_eval(model, cfg, n_episodes=args.eval_episodes)
+        print(f"Warm-start goal rate: {goal_rate * 100:.1f}%")
+        if goal_rate < 0.30:
+            print("WARNING: warm-start goal rate < 30%, checkpoint may not have "
+                  "loaded correctly. Proceeding but results may not be meaningful.")
 
     # --- Train ---
     print(f"\nTraining constrained policy for {args.timesteps} steps...")
@@ -263,7 +280,7 @@ def main():
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     write_csv(cb.rows, out / "phase6b_episodes.csv")
-    model.save(out / "saferl_phase6b.zip")
+    model.save(out / f"{args.model_name}.zip")
 
     s = summarise("phase6b", cb.rows)
     print(f"\n[phase6b] episodes={s['episodes']} goals={s['goals']} "
